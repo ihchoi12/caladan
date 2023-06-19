@@ -543,7 +543,7 @@ fn process_result_final(
     }
 
     println!(
-        "{}, {}, {}, {}, {}, {:.1}, {:.1}, {:.1}, {:.1}, {:.1}, {}, {}",
+        "[RESULT] {}, {}, {}, {}, {}, {:.1}, {:.1}, {:.1}, {:.1}, {:.1}, {}, {}",
         sched.service.name(),
         (packet_count + drop_count) as u64 * 1000_000_000 / duration_to_ns(last_send - first_send),
         packet_count as u64 * 1000_000_000 / duration_to_ns(last_send - first_send),
@@ -1147,17 +1147,17 @@ fn main() {
                 .help("How long the application should run for"),
         )
         .arg(
-            Arg::with_name("mpps")
-                .long("mpps")
+            Arg::with_name("pps")
+                .long("pps")
                 .takes_value(true)
-                .default_value("0.02")
+                .default_value("10000")
                 .help("How many *million* packets should be sent per second"),
         )
         .arg(
-            Arg::with_name("start_mpps")
-                .long("start_mpps")
+            Arg::with_name("start_pps")
+                .long("start_pps")
                 .takes_value(true)
-                .default_value("0.0")
+                .default_value("0")
                 .help("Initial rate to sample at"),
         )
         .arg(
@@ -1297,8 +1297,8 @@ fn main() {
     let discard_pct = value_t_or_exit!(matches, "discard_pct", f32);
 
     let runtime = Duration::from_secs(value_t!(matches, "runtime", u64).unwrap());
-    let packets_per_second = (1.0e6 * value_t_or_exit!(matches, "mpps", f32)) as usize;
-    let start_packets_per_second = (1.0e6 * value_t_or_exit!(matches, "start_mpps", f32)) as usize;
+    let packets_per_second = (value_t_or_exit!(matches, "pps", f32)) as usize;
+    let start_packets_per_second = (value_t_or_exit!(matches, "start_pps", f32)) as usize;
     assert!(start_packets_per_second <= packets_per_second);
     let config = matches.value_of("config");
     let dowarmup = matches.is_present("warmup");

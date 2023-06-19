@@ -51,13 +51,24 @@ impl Backend {
         local_addr: Option<SocketAddrV4>,
         remote_addr: SocketAddrV4,
     ) -> io::Result<Connection> {
+        // println!("Using default local address: {:?}", local_addr.unwrap());
         let laddr = match local_addr {
             Some(x) => x,
-            _ => "0.0.0.0:0".parse().unwrap(),
+            _ => {
+                let default_addr: SocketAddrV4 = "0.0.0.0:0".parse().unwrap();
+                // println!("Using default local address: {:?}", default_addr);
+                default_addr
+            }
         };
         Ok(match *self {
-            Backend::Linux => Connection::LinuxTcp(TcpStream::connect(remote_addr)?),
-            Backend::Runtime => Connection::RuntimeTcp(TcpConnection::dial(laddr, remote_addr)?),
+            Backend::Linux => {
+                // println!("Connecting using Linux backend to {:?}", remote_addr);
+                Connection::LinuxTcp(TcpStream::connect(remote_addr)?)
+            }
+            Backend::Runtime => {
+                // println!("Connecting using Runtime backend to {:?}", remote_addr);
+                Connection::RuntimeTcp(TcpConnection::dial(laddr, remote_addr)?)
+            }
         })
     }
 
