@@ -68,6 +68,9 @@ use reflex::ReflexProtocol;
 mod http;
 use http::HttpProtocol;
 
+use std::fs::File;
+static mut EXPTID: Option<String> = None;
+
 #[derive(Copy, Clone, Debug)]
 enum Distribution {
     Zero,
@@ -494,7 +497,7 @@ fn process_result_final(
 
     if packet_count <= 1 {
         println!(
-            "{}, {}, 0, {}, {}, {}",
+            "[RESULT] {}, {}, 0, {}, {}, {}",
             sched.service.name(),
             sched.rps,
             drop_count,
@@ -543,8 +546,9 @@ fn process_result_final(
     }
 
     println!(
-        "[RESULT] {}, {}, {}, {}, {}, {:.1}, {:.1}, {:.1}, {:.1}, {:.1}, {}, {}",
+        "[RESULT] {}, {}, {}, {}, {}, {}, {:.1}, {:.1}, {:.1}, {:.1}, {:.1}, {}, {}",
         sched.service.name(),
+        sched.rps,
         (packet_count + drop_count) as u64 * 1000_000_000 / duration_to_ns(last_send - first_send),
         packet_count as u64 * 1000_000_000 / duration_to_ns(last_send - first_send),
         drop_count,
@@ -558,13 +562,50 @@ fn process_result_final(
         first_tsc
     );
 
-    if let OutputMode::Buckets = sched.output {
-        print!("Latencies: ");
-        for k in buckets.keys() {
-            print!("{}:{} ", k, buckets[k]);
+    
+    unsafe {
+        if let Some(exptid) = &EXPTID {
+            if exptid != "null" {
+                if let Ok(mut file) = File::create(format!("{}.latency", exptid)) {
+                    let mut latencies: Vec<f64> = Vec::new();
+                    let mut counts: Vec<usize> = Vec::new();
+
+                    for (k, v) in buckets.iter() {
+                        latencies.push(*k as f64);
+                        counts.push(*v);
+                    }
+
+                    let total_count: u32 = counts.iter().map(|&count| count as u32).sum();
+                    
+                    
+                    write!(file, "Latencies: \n").expect("Failed to write to file");
+                    let mut cumulative_percentage = 0.0;
+                    for (k, v) in buckets.iter() {
+                        let percentage = (*v as f64 / total_count as f64) * 100.0; // Calculate the percentage
+                        cumulative_percentage += percentage;
+                        write!(file, "{},{},{:.2}\n", k, buckets[k], cumulative_percentage).expect("Failed to write to file");
+                    }
+                    writeln!(file, "").expect("Failed to write to file");
+                    
+                    
+                    let mean: f64 = latencies.iter().zip(counts.iter()).map(|(&l, &c)| l * c as f64).sum::<f64>() / total_count as f64;
+                    let squared_diffs: Vec<f64> = latencies.iter().map(|&x| (x - mean).powi(2)).collect();
+                    let variance: f64 = squared_diffs.iter().sum::<f64>() / total_count as f64;
+                    let standard_deviation: f64 = variance.sqrt();
+                    // let sqdiff = squared_diffs.iter().sum::<f64>();
+                    // writeln!(file, "Total Count: {}", total_count).expect("Failed to write to file");
+                    writeln!(file, "Mean: {:.2}", mean).expect("Failed to write to file");
+                    // writeln!(file, "squared_diffs: {:.2}", sqdiff).expect("Failed to write to file");
+                    // writeln!(file, "variance: {:.2}", variance).expect("Failed to write to file");
+                    writeln!(file, "Standard Deviation: {:.2}", standard_deviation).expect("Failed to write to file");
+
+                } else {
+                    eprintln!("Failed to create file");
+                }
+            }
         }
-        println!("");
     }
+
 
     if let OutputMode::Trace = sched.output {
         print!("Trace: ");
@@ -1102,6 +1143,13 @@ fn main() {
     let matches = App::new("Synthetic Workload Application")
         .version("0.1")
         .arg(
+            Arg::with_name("exptid")
+                .long("exptid")
+                .value_name("ID")
+                .default_value("null")
+                .help("Experiment ID"),
+        )
+        .arg(
             Arg::with_name("ADDR")
                 .index(1)
                 .multiple(true)
@@ -1288,6 +1336,10 @@ fn main() {
         .args(&HttpProtocol::args())
         .get_matches();
 
+    let exptid = matches.value_of("exptid").unwrap_or("null").to_string();
+    unsafe {
+        EXPTID = Some(exptid.clone());
+    }
     let addrs: Vec<SocketAddrV4> = matches
         .values_of("ADDR")
         .unwrap()
@@ -1380,7 +1432,7 @@ fn main() {
         },
         "local-client" => {
             backend.init_and_run(config, move || {
-                println!("Distribution, Target, Actual, Dropped, Never Sent, Median, 90th, 99th, 99.9th, 99.99th, Start, StartTsc");
+                println!("Distribution, RPS, Target, Actual, Dropped, Never Sent, Median, 90th, 99th, 99.9th, 99.99th, Start, StartTsc");
                 if dowarmup {
                     for packets_per_second in (1..3).map(|i| i * 100000) {
                         let sched = gen_classic_packet_schedule(

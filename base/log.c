@@ -45,8 +45,8 @@ void logk(int level, const char *fmt, ...)
 	va_end(ptr);
 	puts(buf);
 
-	if (level <= LOG_ERR)
-		fflush(stdout);
+	// if (level <= LOG_ERR)
+	fflush(stdout);
 }
 
 #define MAX_CALL_DEPTH	256
