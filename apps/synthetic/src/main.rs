@@ -395,6 +395,7 @@ struct ScheduleResult {
     first_send: Option<Duration>,
     last_send: Option<Duration>,
     latencies: BTreeMap<u64, usize>,
+    latencies_raw: Vec<u64>,
     first_tsc: Option<u64>,
     trace: Option<Vec<TraceResult>>,
 }
@@ -479,6 +480,7 @@ fn process_result_final(
     sched_start: Duration,
 ) -> bool {
     let mut buckets: BTreeMap<u64, usize> = BTreeMap::new();
+    let mut latencies_raw: Vec<u64> = Vec::new();
 
     let packet_count = results.iter().map(|res| res.packet_count).sum::<usize>();
     let drop_count = results.iter().map(|res| res.drop_count).sum::<usize>();
@@ -510,6 +512,9 @@ fn process_result_final(
     results.iter().for_each(|res| {
         for (k, v) in &res.latencies {
             *buckets.entry(*k).or_insert(0) += v;
+        }
+        for lat in res.latencies_raw {
+            latencies_raw.push(lat);
         }
     });
 
@@ -602,6 +607,15 @@ fn process_result_final(
                 } else {
                     eprintln!("Failed to create file");
                 }
+
+                if let Ok(mut file) = File::create(format!("{}.latency_raw", exptid)) {
+                    for (index, latency) in latencies_raw.iter().enumerate() {
+                        writeln!(file, "{},{}", index, latency)
+                            .expect("Failed to write to file");
+                    }
+                } else {
+                    eprintln!("Failed to create file");
+                }
             }
         }
     }
@@ -648,14 +662,19 @@ fn process_result(sched: &RequestSchedule, packets: &mut [Packet]) -> Option<Sch
     let mut never_sent = 0;
     let mut dropped = 0;
     let mut latencies = BTreeMap::new();
+    let mut latencies_raw: Vec<u64> = Vec::new(); 
     for p in packets.iter() {
         match (p.actual_start, p.completion_time) {
             (None, _) => never_sent += 1,
             (_, None) => dropped += 1,
             (Some(ref start), Some(ref end)) => {
-                *latencies
-                    .entry(duration_to_ns(*end - *start) / 1000)
-                    .or_insert(0) += 1
+                let latency_ns = duration_to_ns(*end - *start);
+                
+                // Add the latency to the latencies_raw vector
+                latencies_raw.push(latency_ns / 1000);
+                
+                // Update the latencies BTreeMap
+                *latencies.entry(latency_ns / 1000).or_insert(0) += 1;
             }
         }
     }
@@ -703,6 +722,7 @@ fn process_result(sched: &RequestSchedule, packets: &mut [Packet]) -> Option<Sch
         first_send: first_send,
         last_send: last_send,
         latencies: latencies,
+        latencies_raw: latencies_raw,
         first_tsc: first_tsc,
         trace: trace,
     })
