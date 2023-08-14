@@ -512,8 +512,8 @@ fn process_result_final(
         for (k, v) in &res.latencies {
             *buckets.entry(*k).or_insert(0) += v;
         }
-        for lat in res.latencies_raw {
-            latencies_raw.push(lat);
+        for lat in &res.latencies_raw {
+            latencies_raw.push(*lat);
         }
     });
 
@@ -1506,7 +1506,7 @@ fn main() {
                 });
 
                 if !live_mode {
-                    println!("Distribution, Target, Actual, Dropped, Never Sent, Median, 90th, 99th, 99.9th, 99.99th, Start, StartTsc");
+                    println!("Distribution, RPS, Target, Actual, Dropped, Never Sent, Median, 90th, 99th, 99.9th, 99.99th, Start, StartTsc");
                 }
                 match (matches.value_of("protocol").unwrap(), &barrier_group) {
                     (_, Some(lockstep::Group::Client(ref _c))) => (),
