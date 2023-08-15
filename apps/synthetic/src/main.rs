@@ -607,7 +607,7 @@ fn process_result_final(
                     writeln!(file, "Standard Deviation: {:.2}", standard_deviation).expect("Failed to write to file");
 
                 } else {
-                    eprintln!("Failed to create file");
+                    eprintln!("Failed to create file {}.latency", exptid);
                 }
 
                 if let Ok(mut file) = File::create(format!("{}.latency_raw", exptid)) {
@@ -616,7 +616,7 @@ fn process_result_final(
                             .expect("Failed to write to file");
                     }
                 } else {
-                    eprintln!("Failed to create file");
+                    eprintln!("Failed to create file {}..latency_raw", exptid);
                 }
             }
         }
