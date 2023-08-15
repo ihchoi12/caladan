@@ -67,6 +67,9 @@ use reflex::ReflexProtocol;
 mod http;
 use http::HttpProtocol;
 
+mod resp;
+use resp::RespProtocol;
+
 use std::fs::File;
 static mut EXPTID: Option<String> = None;
 
@@ -1238,7 +1241,7 @@ fn main() {
                 .short("p")
                 .long("protocol")
                 .value_name("PROTOCOL")
-                .possible_values(&["synthetic", "memcached", "dns", "reflex", "http"])
+                .possible_values(&["synthetic", "memcached", "dns", "reflex", "http", "resp"])
                 .default_value("synthetic")
                 .help("Server protocol"),
         )
@@ -1353,6 +1356,7 @@ fn main() {
         .args(&DnsProtocol::args())
         .args(&ReflexProtocol::args())
         .args(&HttpProtocol::args())
+        .args(&RespProtocol::args())
         .get_matches();
 
     let exptid = matches.value_of("exptid").unwrap_or("null").to_string();
@@ -1382,6 +1386,7 @@ fn main() {
         "dns" => Arc::new(Box::new(DnsProtocol::with_args(&matches, tport))),
         "reflex" => Arc::new(Box::new(ReflexProtocol::with_args(&matches, tport))),
         "http" => Arc::new(Box::new(HttpProtocol::with_args(&matches, tport))),
+        "resp" => Arc::new(Box::new(RespProtocol::with_args(&matches, tport))),
         _ => unreachable!(),
     };
 
