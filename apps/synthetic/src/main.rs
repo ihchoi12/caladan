@@ -1524,6 +1524,10 @@ fn main() {
                         }
 
                     },
+                    ("resp", _) => {
+                        let protocol = RespProtocol::with_args(&matches, Transport::Tcp);
+                        protocol.preload_server(backend, Transport::Tcp, addrs[0]);
+                    }
                     _ => (),
                 };
 
