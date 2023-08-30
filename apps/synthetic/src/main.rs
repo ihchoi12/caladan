@@ -396,6 +396,7 @@ struct ScheduleResult {
     never_sent_count: usize,
     first_send: Option<Duration>,
     last_send: Option<Duration>,
+    last_recv: Option<Duration>,
     latencies: BTreeMap<u64, usize>,
     latencies_raw: Vec<u64>,
     first_tsc: Option<u64>,
@@ -492,6 +493,7 @@ fn process_result_final(
         .sum::<usize>();
     let first_send = results.iter().filter_map(|res| res.first_send).min();
     let last_send = results.iter().filter_map(|res| res.last_send).max();
+    let last_recv = results.iter().filter_map(|res| res.last_recv).max();
     let first_tsc = results.iter().filter_map(|res| res.first_tsc).min();
     let start_unix = wct_start + sched_start;
 
@@ -536,11 +538,6 @@ fn process_result_final(
         return INFINITY;
     };
 
-    let last_send = last_send.unwrap();
-    let first_send = first_send.unwrap();
-    let first_tsc = first_tsc.unwrap();
-    let start_unix = wct_start + first_send;
-
     if let OutputMode::Live = sched.output {
         println!(
             "RPS: {}\tMedian (us): {: <7}\t99th (us): {: <7}\t99.9th (us): {: <7}",
@@ -552,12 +549,16 @@ fn process_result_final(
         return true;
     }
 
+    let first_send = first_send.unwrap();
+    let start_unix = wct_start + first_send;
+
     println!(
         "[RESULT] {}, {}, {}, {}, {}, {}, {:.1}, {:.1}, {:.1}, {:.1}, {:.1}, {}, {}",
         sched.service.name(),
         sched.rps,
-        (packet_count + drop_count) as u64 * 1000_000_000 / duration_to_ns(last_send - first_send),
-        packet_count as u64 * 1000_000_000 / duration_to_ns(last_send - first_send),
+        (packet_count + drop_count) as u64 * 1000_000_000
+            / duration_to_ns(last_send.unwrap() - first_send),
+        packet_count as u64 * 1000_000_000 / duration_to_ns(last_recv.unwrap() - first_send),
         drop_count,
         never_sent_count,
         percentile(50.0),
@@ -566,7 +567,7 @@ fn process_result_final(
         percentile(99.9),
         percentile(99.99),
         start_unix.duration_since(UNIX_EPOCH).unwrap().as_secs(),
-        first_tsc
+        first_tsc.unwrap()
     );
 
     
@@ -689,11 +690,6 @@ fn process_result(sched: &RequestSchedule, packets: &mut [Packet]) -> Option<Sch
         return None;
     }
 
-    let first_send = packets.iter().filter_map(|p| p.actual_start).min();
-    let last_send = packets.iter().filter_map(|p| p.actual_start).max();
-
-    let first_tsc = packets.iter().filter_map(|p| p.completion_server_tsc).min();
-
     let trace = match sched.output {
         OutputMode::Trace => {
             let mut traceresults: Vec<_> = packets
@@ -721,11 +717,12 @@ fn process_result(sched: &RequestSchedule, packets: &mut [Packet]) -> Option<Sch
         packet_count: packets.len() - dropped - never_sent,
         drop_count: dropped,
         never_sent_count: never_sent,
-        first_send: first_send,
-        last_send: last_send,
+        first_send: packets.iter().filter_map(|p| p.actual_start).min(),
+        last_send: packets.iter().filter_map(|p| p.actual_start).max(),
+        last_recv: packets.iter().filter_map(|p| p.completion_time).max(),
         latencies: latencies,
         latencies_raw: latencies_raw,
-        first_tsc: first_tsc,
+        first_tsc: packets.iter().filter_map(|p| p.completion_server_tsc).min(),
         trace: trace,
     })
 }
@@ -784,19 +781,27 @@ fn run_client_worker(
     let socket2 = socket.clone();
     let rproto = proto.clone();
     let wg2 = wg.clone();
+    let received_packets = Arc::new(AtomicUsize::new(0));
+    let received_packets2 = received_packets.clone();
+    
     let receive_thread = backend.spawn_thread(move || {
         let mut recv_buf = vec![0; 4096];
         let mut receive_times = vec![None; packets_per_thread];
         let mut buf = Buffer::new(&mut recv_buf);
         let use_ordering = rproto.uses_ordered_requests();
         wg2.done();
+        let mut recv_cnt = 0;
         for i in 0..receive_times.len() {
+            // eprintln!("{} {}", i, receive_times.len());
             match rproto.read_response(&socket2, &mut buf) {
                 Ok((mut idx, tsc)) => {
                     if use_ordering {
                         idx = i;
                     }
+                    // eprintln!("receive");
                     receive_times[idx] = Some((Instant::now(), tsc));
+                    recv_cnt += 1;
+                    received_packets2.store(recv_cnt, Ordering::SeqCst)
                 }
                 Err(e) => {
                     match e.raw_os_error() {
@@ -810,11 +815,12 @@ fn run_client_worker(
                 }
             }
         }
+        // eprintln!("Returning");
         receive_times
     });
 
-    // If the send or receive thread is still running 500 ms after it should have finished,
-    // then stop it by triggering a shutdown on the socket.
+    // Start a timer thread that cancels the send thread if it is still running
+    // 500ms after it should have finished by triggering a shutdown on the socket.
     let last = packets[packets.len() - 1].target_start;
     let socket2 = socket.clone();
     let wg2 = wg.clone();
@@ -827,14 +833,15 @@ fn run_client_worker(
             return;
         }
         backend.sleep(last + Duration::from_millis(500));
-        if Arc::strong_count(&socket2) > 1 {
-            socket2.shutdown();
-        }
+        // unblock the writer thread if needed
+        socket2.shutdown_write();
     });
 
     wg.done();
     wg_start.wait();
     let start = Instant::now();
+
+    let mut nsent = 0;
 
     for (i, packet) in packets.iter_mut().enumerate() {
         payload.clear();
@@ -858,12 +865,31 @@ fn run_client_worker(
             }
             break;
         }
+        nsent += 1;    
     }
 
-    wg.done();
-    wg_start.wait();
-
+    // wait for the timer thread to end
     timer.join().unwrap();
+    if let Transport::Tcp = tport {
+        let mut prev_received = received_packets.load(Ordering::SeqCst);
+
+        while received_packets.load(Ordering::SeqCst) < nsent {
+            eprintln!("sent: {}, received: {}", nsent, received_packets.load(Ordering::SeqCst));
+            backend.sleep(Duration::from_secs(1));
+
+            let current_received = received_packets.load(Ordering::SeqCst);
+
+            Check if the count has increased, otherwise break the loop
+            if current_received == prev_received {
+                break;
+            }
+
+            prev_received = current_received;
+        }
+    }
+
+    socket.shutdown();
+
     receive_thread
         .join()
         .unwrap()
@@ -960,12 +986,6 @@ fn run_live_client(
         wg_start.done();
         let start_unix = SystemTime::now();
 
-        wg.add(nthreads as i32);
-        wg_start.add(1 as i32);
-
-        wg.wait();
-        wg_start.done();
-
         let mut packets: Vec<Vec<Option<ScheduleResult>>> = conn_threads
             .into_iter()
             .map(|s| s.join().unwrap())
@@ -999,6 +1019,7 @@ fn run_client(
 ) -> bool {
     let schedules = Arc::new(schedules);
     let wg = shenango::WaitGroup::new();
+
     wg.add(3 * nthreads as i32);
     let wg_start = shenango::WaitGroup::new();
     wg_start.add(1 as i32);
@@ -1030,12 +1051,6 @@ fn run_client(
 
     wg_start.done();
     let start_unix = SystemTime::now();
-
-    wg.add(nthreads as i32);
-    wg_start.add(1 as i32);
-
-    wg.wait();
-    wg_start.done();
 
     let mut packets: Vec<Vec<Option<ScheduleResult>>> = conn_threads
         .into_iter()

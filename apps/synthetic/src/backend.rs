@@ -190,22 +190,36 @@ impl Connection {
         }
     }
 
-    #[allow(unused)]
-    pub fn shutdown(&self) {
+    fn shutdown_rdwr(&self, how: libc::c_int) {
         match *self {
             Connection::LinuxUdp(ref s) => unsafe {
-                let _ = libc::shutdown(s.as_raw_fd(), libc::SHUT_RDWR);
+                let _ = libc::shutdown(s.as_raw_fd(), how);
             },
             Connection::LinuxTcp(ref s) => unsafe {
-                let _ = libc::shutdown(s.as_raw_fd(), libc::SHUT_RDWR);
+                let _ = libc::shutdown(s.as_raw_fd(), how);
             },
             Connection::RuntimeUdp(ref s) => s.shutdown(),
             Connection::RuntimeTcp(ref s) => {
-                if s.shutdown(libc::SHUT_RDWR).is_err() {
+                if s.shutdown(how).is_err() {
                     s.abort()
                 }
             }
         }
+    }
+
+    #[allow(unused)]
+    pub fn shutdown_read(&self) {
+        self.shutdown_rdwr(libc::SHUT_RD);
+    }
+
+    #[allow(unused)]
+    pub fn shutdown_write(&self) {
+        self.shutdown_rdwr(libc::SHUT_WR);
+    }
+
+    #[allow(unused)]
+    pub fn shutdown(&self) {
+        self.shutdown_rdwr(libc::SHUT_RDWR);
     }
 }
 
