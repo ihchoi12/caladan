@@ -879,7 +879,7 @@ fn run_client_worker(
 
             let current_received = received_packets.load(Ordering::SeqCst);
 
-            Check if the count has increased, otherwise break the loop
+            // Check if the count has increased, otherwise break the loop
             if current_received == prev_received {
                 break;
             }
