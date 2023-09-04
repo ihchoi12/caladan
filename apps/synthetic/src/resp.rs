@@ -23,6 +23,7 @@ use crate::backend::Backend;
     CONSTANTS
 #############################################################################*/
 
+const STRING_KEY_BASE: &str = "string";
 const LIST_KEY_BASE: &str = "list";
 
 const WRITE_PROBABILITY: i32 = 20;
@@ -32,7 +33,8 @@ const WRITE_PROBABILITY: i32 = 20;
 #############################################################################*/
 
 enum RedisDataType {
-    List(usize, usize), // number of lists, number of elements in each list, the list key base
+    String(usize), // initial number of strings
+    List(usize, usize), // initial number of lists, number of elements in each list
 }
 
 /*#############################################################################
@@ -102,6 +104,15 @@ impl RespProtocol {
 
         let mut data_types = Vec::new();
 
+        if matches.is_present("redis-string") {
+            let count = match matches.value_of("redis-string") {
+                None => panic!("No value for option `redis-string`"),
+                Some(val) => val.parse::<usize>().unwrap()
+            };
+
+            data_types.push(RedisDataType::String(count));
+        }
+
         if matches.is_present("redis-list") {
             let (count, element_count) = match matches.value_of("redis-list") {
                 None => panic!("No value for option `redis-list`"),
@@ -124,10 +135,15 @@ impl RespProtocol {
 
     pub fn args<'a, 'b>() -> Vec<clap::Arg<'a, 'b>> {
         vec![
-            Arg::with_name("redis_list")
-                .long("redis_list")
+            Arg::with_name("redis-string")
+                .long("redis-string")
                 .takes_value(true)
-                .help("Signals Redis to use lists with value `a:b` where `a` is the list count and `b` is the element count in each list."),
+                .help("Enables string commands with value as the initial string count in Redis."),
+
+            Arg::with_name("redis-list")
+                .long("redis-list")
+                .takes_value(true)
+                .help("Enables list commands with value `a:b` where `a` is the initial list count and `b` is the initial element count in each list in Redis."),
         ]
     }
 
@@ -145,8 +161,18 @@ impl RespProtocol {
         let mut buf = Vec::with_capacity(4096);
 
         for dtype in self.data_types.iter() {
-            let cmds = match dtype {
-                RedisDataType::List(count, element_count) => (0..*count)
+            let cmds: Box<dyn Iterator<Item = String>> = match dtype {
+                RedisDataType::String(count) => Box::new((0..*count)
+                    .map(
+                        |string| {
+                            let key = format!("{STRING_KEY_BASE}{string}");
+                            let value = format!("{string}");
+                            format!("*3\r\n$3\r\nSET\r\n${}\r\n{}\r\n${}\r\n{}\r\n", key.len(), key, value.len(), value)
+                        }
+                    )
+                ),
+
+                RedisDataType::List(count, element_count) => Box::new((0..*count)
                     .cartesian_product(0..*element_count)
                     .map(
                         |(list, element)| {
@@ -154,7 +180,8 @@ impl RespProtocol {
                             let value = format!("{element}");
                             format!("*3\r\n$5\r\nRPUSH\r\n${}\r\n{}\r\n${}\r\n{}\r\n", key.len(), key, value.len(), value)
                         }
-                    ),
+                    )
+                ),
             };
 
             for cmd in cmds {
@@ -176,6 +203,24 @@ impl RespProtocol {
 impl RedisDataType {
     fn generate_random_command(&self, rng: &mut impl Rng, is_write_command: bool) -> String {
         match self {
+            RedisDataType::String(count) => {
+                let key = format!("{}{}", STRING_KEY_BASE, rng.gen_range(0, *count));
+                if is_write_command { match rng.gen_range(0, 2) {
+                    // SET
+                    0 => format_command(&["SET", &key, &format!("{}", rng.gen::<usize>())]),
+
+                    // GETDEL
+                    1 => format_command(&["GETDEL", &key]),
+
+                    _ => unreachable!(),
+                } } else { match rng.gen_range(0, 1) {
+                    // GET
+                    0 => format_command(&["GET", &key]),
+
+                    _ => unreachable!(),
+                } }
+            },
+
             RedisDataType::List(count, _) => {
                 let key = format!("{}{}", LIST_KEY_BASE, rng.gen_range(0, *count));
                 if is_write_command { match rng.gen_range(0, 2) {
