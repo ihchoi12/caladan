@@ -81,12 +81,31 @@ impl LoadgenProtocol for RespProtocol {
             buf.push_data(new_bytes);
         }
 
-        check_good_response(buf.get_data())?;
+        let dtype = buf.get_data()[0];
+        buf.pull_data(1);
+        match dtype {
+            b'+' | b'-' | b':' => {
+                self.read_line(sock, buf, false)?;
+            },
 
-        //eprintln!("Received: {}", from_utf8(buf.get_data()).unwrap());
+            b'$' => {
+                let len = self.read_line(sock, buf, true)?.1.unwrap();
+                let len = &len[..len.len() - 2]; // Remove "\r\n".
+                let mut len = from_utf8(len).unwrap().parse::<isize>().unwrap();
+                if len != -1 {
+                    while len > 0 {
+                        let (bytes_read, _) = self.read_line(sock, buf, false)?; // bulk string length: we assume that the string length coincides with \r\n.
+                        len -= bytes_read as isize;
+                    }
+                }
+            },
 
-        buf.pull_data(buf.data_size());
-        buf.try_shrink()?;
+            b'*' => {
+                todo!("array return type");
+            },
+
+            c => panic!("Invalid RESP type: {}", c as char),
+        };
 
         return Ok((0, 0));
     }
@@ -128,6 +147,8 @@ impl RespProtocol {
             data_types.push(RedisDataType::List(count, element_count));
         }
 
+        assert!(!data_types.is_empty(), "At least one Redis data type must be chosen");
+
         RespProtocol {
             data_types
         }
@@ -158,7 +179,8 @@ impl RespProtocol {
         }
 
         let mut conn = backend.create_tcp_connection(None, addr).expect("Preload connection failed");
-        let mut buf = Vec::with_capacity(4096);
+        let mut buf = vec![0u8; 4096];
+        let mut buf = Buffer::new(&mut buf);
 
         for dtype in self.data_types.iter() {
             let cmds: Box<dyn Iterator<Item = String>> = match dtype {
@@ -188,15 +210,63 @@ impl RespProtocol {
                 if let Err(e) = conn.write_all(cmd.as_bytes()) {
                     panic!("Preload write failed: {}\nCommand:\n{}", e, cmd);
                 }
-                buf.clear();
-                if let Err(e) = conn.read(&mut buf) {
+                let response = self.read_line(&conn, &mut buf, true);
+                if let Err(e) = response {
                     panic!("Preload read failed: {}\nCommand:\n{}", e, cmd);
                 }
-                if buf[0] == b'-' {
-                    panic!("Preload command failed: {}\nCommand:\n{}", from_utf8(&buf).unwrap(), cmd);
+                let response = response.unwrap().1.unwrap();
+                if response[0] == b'-' {
+                    panic!("Preload command failed: {}\nCommand:\n{}", from_utf8(&response).unwrap(), cmd);
                 }
             }
         }
+
+        println!("[*] Redis server preload done");
+    }
+
+    /// Returns number of bytes read and, optionally, the bytes read, until a "\r\n".
+    fn read_line(&self, mut sock: &Connection, buf: &mut Buffer, return_data: bool) -> io::Result<(usize, Option<Vec<u8>>)> {
+        let mut bytes_read = 0;
+        let mut line = None;
+        if return_data { line = Some(Vec::<u8>::with_capacity(8)); }
+
+        let mut found_carriage_return = false;
+
+        loop {
+            if buf.data_size() == 0 {
+                buf.try_shrink()?;
+                let new_bytes = sock.read(buf.get_empty_buf())?;
+                if new_bytes == 0 {
+                    return Err(Error::new(ErrorKind::UnexpectedEof, "eof"));
+                }
+                buf.push_data(new_bytes);
+            }
+
+            if found_carriage_return {
+                if buf.get_data()[0] == b'\n' {
+                    if return_data { line.as_mut().unwrap().push(b'\n'); }
+                    bytes_read += 1;
+                    buf.pull_data(1);
+                    break;
+                } else {
+                    found_carriage_return = false;
+                }
+            }
+
+            if let Some(index) = find_subsequence(buf.get_data(), b"\r") {
+                if return_data { line.as_mut().unwrap().extend_from_slice(&buf.get_data()[..index + 1]); }
+                bytes_read += index + 1;
+                buf.pull_data(index + 1);
+                found_carriage_return = true;
+                continue;
+            }
+
+            if return_data { line.as_mut().unwrap().extend_from_slice(buf.get_data()); }
+            bytes_read += buf.data_size();
+            buf.pull_data(buf.data_size());
+        }
+
+        Ok((bytes_read, line))
     }
 }
 
@@ -254,13 +324,6 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
-}
-
-fn check_good_response(buf: &[u8]) -> io::Result<()> {
-    match buf[0] {
-        b'+' | b'-' | b':' | b'$' | b'*' => Ok(()),
-        _ => Err(Error::new(ErrorKind::Other, format!("got bad RESP response: {}", from_utf8(buf).unwrap()))),
-    }
 }
 
 fn format_command(args: &[&str]) -> String {
