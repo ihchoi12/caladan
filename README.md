@@ -1,3 +1,7 @@
+# Instructions for RESP
+- Use `--protocol=resp` to use RESP.
+- Use arguments to enable data strucutres. For example, `--redis-string=X` to enable strings, where `X` is the initial number of strings to preload Redis with.
+
 # Caladan
 
 Caladan is a system that enables servers in datacenters to
