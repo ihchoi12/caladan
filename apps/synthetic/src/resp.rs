@@ -9,7 +9,7 @@ use rand::{Rng, thread_rng};
 use std::io::{self, Write};
 use std::io::{Error, ErrorKind, Read};
 use std::net::SocketAddrV4;
-use std::str::from_utf8;
+use std::str::{from_utf8, FromStr};
 
 use Buffer;
 use Connection;
@@ -43,6 +43,7 @@ enum RedisDataType {
 
 pub struct RespProtocol {
     data_types: Vec<RedisDataType>,
+    additional_servers: Vec<SocketAddrV4>,
 }
 
 /*#############################################################################
@@ -123,6 +124,15 @@ impl RespProtocol {
 
         let mut data_types = Vec::new();
 
+        let additional_servers = if matches.is_present("redis-preload") {
+            match matches.values_of("redis-preload") {
+                None => panic!("No value for option `redis-preload`"),
+                Some(servers) => servers.map(|e| SocketAddrV4::from_str(e).expect("Invalid server address")).collect_vec(),
+            }
+        } else {
+            Vec::new()
+        };
+
         if matches.is_present("redis-string") {
             let count = match matches.value_of("redis-string") {
                 None => panic!("No value for option `redis-string`"),
@@ -150,7 +160,8 @@ impl RespProtocol {
         assert!(!data_types.is_empty(), "At least one Redis data type must be chosen");
 
         RespProtocol {
-            data_types
+            data_types,
+            additional_servers,
         }
     }
 
@@ -165,10 +176,28 @@ impl RespProtocol {
                 .long("redis-list")
                 .takes_value(true)
                 .help("Enables list commands with value `a:b` where `a` is the initial list count and `b` is the initial element count in each list in Redis."),
+
+            Arg::with_name("redis-preload")
+                .long("redis-preload")
+                .takes_value(true)
+                .multiple(true)
+                .help("Set up another Redis server using preload. The value of this option is the IP:Port of the new server."),
         ]
     }
 
-    pub fn preload_server(
+    pub fn preload_servers(
+        &self,
+        backend: Backend,
+        tport: Transport,
+        addr: SocketAddrV4,
+    ) {
+        self.preload_server(backend, tport, addr);
+        for &addr in self.additional_servers.iter() {
+            self.preload_server(backend, tport, addr);
+        }
+    }
+
+    fn preload_server(
         &self,
         backend: Backend,
         tport: Transport,
