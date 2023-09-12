@@ -866,14 +866,27 @@ fn run_client_worker(
     let wg2 = wg.clone();
     let wg3 = wg_start.clone();
     let live_mode2 = live_mode;
+    let mut nsent = 0;
     let timer = backend.spawn_thread(move || {
         wg2.done();
         wg3.wait();
+        
         if live_mode2 {
             return;
         }
+        return;
         backend.sleep(last + Duration::from_millis(500));
         // unblock the writer thread if needed
+        let mut prev_nsent = nsent;
+        while true {
+            backend.sleep(Duration::from_secs(1));
+            if prev_nsent == nsent {
+                break;
+            }
+            eprintln!("prev_nsent: {}, nsent: {}", prev_nsent, nsent);
+            prev_nsent = nsent;
+        } 
+        
         socket2.shutdown_write();
     });
 
@@ -881,7 +894,7 @@ fn run_client_worker(
     wg_start.wait();
     let start = Instant::now();
 
-    let mut nsent = 0;
+    
 
     for (i, packet) in packets.iter_mut().enumerate() {
         payload.clear();
@@ -892,9 +905,9 @@ fn run_client_worker(
             backend.sleep(packet.target_start - t);
             t = start.elapsed();
         }
-        if !live_mode && t > packet.target_start + Duration::from_micros(5) {
-            continue;
-        }
+        // if !live_mode && t > packet.target_start + Duration::from_micros(5) {
+        //     continue;
+        // }
 
         packet.actual_start = Some(start.elapsed());
         if let Err(e) = (&*socket).write_all(&payload[..]) {
@@ -914,7 +927,7 @@ fn run_client_worker(
         let mut prev_received = received_packets.load(Ordering::SeqCst);
 
         while received_packets.load(Ordering::SeqCst) < nsent {
-            eprintln!("sent: {}, received: {}", nsent, received_packets.load(Ordering::SeqCst));
+            // eprintln!("sent: {}, received: {}", nsent, received_packets.load(Ordering::SeqCst));
             backend.sleep(Duration::from_secs(1));
 
             let current_received = received_packets.load(Ordering::SeqCst);
