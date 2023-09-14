@@ -250,6 +250,8 @@ impl RespProtocol {
             }
         }
 
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
         println!("[*] Redis server preload done");
     }
 
