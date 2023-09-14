@@ -17,7 +17,7 @@ extern crate arrayvec;
 
 use arrayvec::ArrayVec;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::f32::INFINITY;
 use std::io;
 use std::io::{Error, ErrorKind, Read, Write};
@@ -625,29 +625,69 @@ fn process_result_final(
 
 
     if let OutputMode::Trace = sched.output {
-        print!("Trace: ");
+        let mut cnt_map: HashMap<u64, u64> = HashMap::new();
+        let mut sum_lat_map: HashMap<u64, u64> = HashMap::new();
+        
         for p in results.into_iter().filter_map(|p| p.trace).kmerge() {
+            
             if let Some(completion_time) = p.completion_time {
                 let actual_start = p.actual_start.unwrap();
-                print!(
-                    "{}:{}:{}:{} ",
-                    duration_to_ns(actual_start),
-                    duration_to_ns(actual_start) as i64 - duration_to_ns(p.target_start) as i64,
-                    duration_to_ns(completion_time - actual_start),
-                    p.server_tsc,
-                )
-            } else if p.actual_start.is_some() {
-                let actual_start = p.actual_start.unwrap();
-                print!(
-                    "{}:{}:-1:-1 ",
-                    duration_to_ns(actual_start),
-                    duration_to_ns(actual_start) as i64 - duration_to_ns(p.target_start) as i64,
-                )
-            } else {
-                print!("{}:-1:-1:-1 ", duration_to_ns(p.target_start))
+                // println!(
+                //     "{},{}",
+                //     duration_to_ns(actual_start),
+                //     // duration_to_ns(actual_start) as i64 - duration_to_ns(p.target_start) as i64,
+                //     duration_to_ns(completion_time - actual_start),
+                //     // p.server_tsc,
+                // )
+                let ms = ( (duration_to_ns(actual_start) / 1000000) / 10 ) * 10;
+                let lat = duration_to_ns(completion_time - actual_start) as u64 / 1000;
+
+                let count = cnt_map.entry(ms).or_insert(0);
+                *count += 1;
+
+                let sum_lat = sum_lat_map.entry(ms).or_insert(0);
+                *sum_lat += lat;
+            } 
+            // else if p.actual_start.is_some() {
+            //     let actual_start = p.actual_start.unwrap();
+            //     print!(
+            //         "{}:{}:-1:-1 ",
+            //         duration_to_ns(actual_start),
+            //         duration_to_ns(actual_start) as i64 - duration_to_ns(p.target_start) as i64,
+            //     )
+            // } else {
+            //     print!("{}:-1:-1:-1 ", duration_to_ns(p.target_start))
+            // }
+        }
+        let mut avg_lat_map: HashMap<u64, u64> = HashMap::new();
+        for (ms, count) in &cnt_map {
+            if let Some(&sum_lat) = sum_lat_map.get(ms) {
+                let avg_lat = sum_lat / *count;
+                avg_lat_map.insert(*ms, avg_lat);
             }
         }
-        println!("");
+
+        // Convert avg_lat_map into a BTreeMap for sorting by keys
+        let sorted_avg_lat_map: BTreeMap<u64, u64> = avg_lat_map.into_iter().collect();
+        
+        if let Some(exptid) = unsafe {&EXPTID} {
+            if exptid != "null" {
+                if let Ok(mut file) = File::create(format!("{}.latency_trace", exptid)) {
+                    for (ms, avg_lat) in sorted_avg_lat_map.iter() {
+                        writeln!(file, "{},{}", ms, avg_lat).expect("Failed to write to file");
+                    }
+                }
+            }
+            else {
+                // Iterate and print the elements in ascending order of keys
+                for (ms, avg_lat) in sorted_avg_lat_map.iter() {
+                    println!("{},{}", ms, avg_lat);
+                }
+            }
+        }
+        
+
+        // println!("");
     }
 
     true
@@ -826,14 +866,27 @@ fn run_client_worker(
     let wg2 = wg.clone();
     let wg3 = wg_start.clone();
     let live_mode2 = live_mode;
+    let mut nsent = 0;
     let timer = backend.spawn_thread(move || {
         wg2.done();
         wg3.wait();
+        
         if live_mode2 {
             return;
         }
+        return;
         backend.sleep(last + Duration::from_millis(500));
         // unblock the writer thread if needed
+        let mut prev_nsent = nsent;
+        while true {
+            backend.sleep(Duration::from_secs(1));
+            if prev_nsent == nsent {
+                break;
+            }
+            eprintln!("prev_nsent: {}, nsent: {}", prev_nsent, nsent);
+            prev_nsent = nsent;
+        } 
+        
         socket2.shutdown_write();
     });
 
@@ -841,7 +894,7 @@ fn run_client_worker(
     wg_start.wait();
     let start = Instant::now();
 
-    let mut nsent = 0;
+    
 
     for (i, packet) in packets.iter_mut().enumerate() {
         payload.clear();
@@ -852,9 +905,9 @@ fn run_client_worker(
             backend.sleep(packet.target_start - t);
             t = start.elapsed();
         }
-        if !live_mode && t > packet.target_start + Duration::from_micros(5) {
-            continue;
-        }
+        // if !live_mode && t > packet.target_start + Duration::from_micros(5) {
+        //     continue;
+        // }
 
         packet.actual_start = Some(start.elapsed());
         if let Err(e) = (&*socket).write_all(&payload[..]) {
@@ -874,7 +927,7 @@ fn run_client_worker(
         let mut prev_received = received_packets.load(Ordering::SeqCst);
 
         while received_packets.load(Ordering::SeqCst) < nsent {
-            eprintln!("sent: {}, received: {}", nsent, received_packets.load(Ordering::SeqCst));
+            // eprintln!("sent: {}, received: {}", nsent, received_packets.load(Ordering::SeqCst));
             backend.sleep(Duration::from_secs(1));
 
             let current_received = received_packets.load(Ordering::SeqCst);
