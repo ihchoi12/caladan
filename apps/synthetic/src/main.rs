@@ -422,6 +422,8 @@ fn gen_classic_packet_schedule(
             continue;
         }
 
+        println!("{} pps : {} ns", rate, nthreads * 1000_000_000 / rate);
+
         sched.push(RequestSchedule {
             arrival: Distribution::Exponential((nthreads * 1000_000_000 / rate) as f64),
             service: distribution,
@@ -433,6 +435,8 @@ fn gen_classic_packet_schedule(
     }
 
     let ns_per_packet = nthreads * 1000_000_000 / packets_per_second;
+
+    println!("{} pps : {} ns", packets_per_second, ns_per_packet);
 
     sched.push(RequestSchedule {
         arrival: Distribution::Exponential(ns_per_packet as f64),
@@ -1229,6 +1233,138 @@ fn run_local(
         .all(|p| p)
 }
 
+/// The values returned are the *actual* PPS, not the million PPS.
+fn get_zipf_distribution(
+    million_packets_per_second: usize,
+    nthreads: usize
+) -> impl Iterator<Item = usize> {
+    let total_pps = (million_packets_per_second * 1_000_000) as f64;
+    let c = total_pps / ((2 * nthreads - 1) as f64).ln();
+    (1..nthreads + 1).map(move |i| (c / i as f64) as usize)
+}
+
+fn zipf_gen_classic_packet_schedule(
+    runtime: Duration,
+    actual_packets_per_second: usize,
+    output: OutputMode,
+    distribution: Distribution,
+    ramp_up_seconds: usize,
+    nthreads: usize,
+    discard_pct: f32,
+) -> Vec<RequestSchedule> {
+    let mut sched: Vec<RequestSchedule> = Vec::new();
+
+    /* Ramp up in 100ms increments */
+    for t in 1..(10 * ramp_up_seconds) {
+        let rate = t * actual_packets_per_second / (ramp_up_seconds * 10);
+
+        if rate / 1_000_000 == 0 {
+            continue;
+        }
+
+        println!("{} pps : {} ns", rate, nthreads * 1000_000_000_000_000 / rate);
+
+        sched.push(RequestSchedule {
+            arrival: Distribution::Exponential((nthreads * 1000_000_000_000_000 / rate) as f64),
+            service: distribution,
+            output: OutputMode::Silent,
+            runtime: Duration::from_millis(100),
+            rps: rate,
+            discard_pct: 0.0,
+        });
+    }
+
+    let ns_per_packet = nthreads * 1000_000_000_000_000 / actual_packets_per_second;
+
+    println!("{} pps : {} ns", actual_packets_per_second, ns_per_packet);
+
+    sched.push(RequestSchedule {
+        arrival: Distribution::Exponential(ns_per_packet as f64),
+        service: distribution,
+        output: output,
+        runtime: runtime,
+        rps: actual_packets_per_second,
+        discard_pct: discard_pct,
+    });
+
+    sched
+}
+
+fn zipf_run_client(
+    proto: Arc<Box<dyn LoadgenProtocol>>,
+    backend: Backend,
+    addrs: &Vec<SocketAddrV4>,
+    nthreads: usize,
+    tport: Transport,
+    barrier_group: &mut Option<lockstep::Group>,
+    schedules: Vec<Arc<Vec<RequestSchedule>>>,
+    index: usize,
+) -> bool {
+    let wg = shenango::WaitGroup::new();
+
+    wg.add(3 * nthreads as i32);
+    let wg_start = shenango::WaitGroup::new();
+    wg_start.add(1 as i32);
+
+    let conn_threads: Vec<_> = schedules
+        .iter()
+        .enumerate()
+        .map(|(i, schedules)| {
+            let client_idx = 100 + (index * nthreads) + i;
+            let proto = proto.clone();
+            let wg = wg.clone();
+            let wg_start = wg_start.clone();
+            let schedules = schedules.clone();
+            let addr = addrs[i % addrs.len()];
+
+            backend.spawn_thread(move || {
+                run_client_worker(
+                    proto, backend, addr, tport, wg, wg_start, schedules, client_idx, None,
+                )
+            })
+        })
+        .collect();
+    
+    backend.sleep(Duration::from_secs(1));
+    wg.wait();
+
+
+    if let Some(ref mut g) = *barrier_group {
+        g.barrier();
+    }
+
+    wg_start.done();
+    let start_unix = SystemTime::now();
+
+    let packets: Vec<Vec<Option<ScheduleResult>>> = conn_threads
+        .into_iter()
+        .map(|s| s.join().unwrap())
+        .collect();
+
+    let mut sched_start = Duration::from_nanos(100_000_000);
+
+    schedules
+        .iter()
+        .zip(packets.into_iter())
+        .map(|(schedules, packets)| {
+            schedules
+                .iter()
+                .zip(packets.into_iter())
+                .map(|(sched, packet)| {
+                    let perthread = if packet.is_some() { vec![packet.unwrap()] } else { vec![] };
+                    let r = process_result_final(sched, perthread, start_unix, sched_start);
+                    sched_start += sched.runtime;
+                    r
+                })
+                .collect_vec()
+                .into_iter()
+                .all(|p| p)
+        })
+        .collect_vec()
+        .into_iter()
+        .all(|p| p)
+}
+
 fn main() {
     let matches = App::new("Synthetic Workload Application")
         .version("0.1")
@@ -1419,6 +1555,11 @@ fn main() {
                 .default_value("0")
                 .help("seconds to sleep between samples"),
         )
+        .arg(
+            Arg::with_name("zipf")
+                .long("zipf")
+                .help("enable ZIPF distribution for PPS over threads"),
+        )
         .args(&SyntheticProtocol::args())
         .args(&MemcachedProtocol::args())
         .args(&DnsProtocol::args())
@@ -1504,6 +1645,8 @@ fn main() {
         });
         return;
     }
+
+    let zipf = matches.is_present("zipf");
 
     match mode {
         "spawner-server" => match tport {
@@ -1656,6 +1799,35 @@ fn main() {
                         );
                     }
                     backend.sleep(Duration::from_secs(intersample_sleep));
+                }
+
+                if zipf && nthreads > 1 {
+                    let pps_distribution = get_zipf_distribution(packets_per_second, nthreads);
+
+                    let schedules = pps_distribution.map(|pps| {
+                        Arc::new(zipf_gen_classic_packet_schedule(
+                            runtime,
+                            pps,
+                            output,
+                            distribution,
+                            rampup,
+                            1,
+                            discard_pct
+                        ))
+                    }).collect_vec();
+
+                    zipf_run_client(
+                        proto,
+                        backend,
+                        &addrs,
+                        nthreads,
+                        tport,
+                        &mut barrier_group,
+                        schedules,
+                        1
+                    );
+
+                    return;
                 }
 
                 let step_size = (packets_per_second - start_packets_per_second) / samples;
