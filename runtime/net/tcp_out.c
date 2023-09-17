@@ -393,7 +393,7 @@ static int tcp_tx_retransmit_one(tcpconn_t *c, struct mbuf *m)
 
 	/* transmit the packet */
 	tcp_debug_egress_pkt(c, m);
-	printf("TCP TIMEOUT\n");
+	// printf("TCP TIMEOUT\n");
 	fflush(stdout); 
 	ret = net_tx_ip(m, IPPROTO_TCP, c->e.raddr.ip);
 	if (unlikely(ret))

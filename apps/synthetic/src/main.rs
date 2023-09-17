@@ -70,7 +70,7 @@ use http::HttpProtocol;
 mod resp;
 use resp::RespProtocol;
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 static mut EXPTID: Option<String> = None;
 
 #[derive(Copy, Clone, Debug)]
@@ -672,7 +672,13 @@ fn process_result_final(
         
         if let Some(exptid) = unsafe {&EXPTID} {
             if exptid != "null" {
-                if let Ok(mut file) = File::create(format!("{}.latency_trace", exptid)) {
+                let file_path = format!("{}.latency_trace", exptid);
+                // Open the file in append mode using OpenOptions
+                if let Ok(mut file) = OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(&file_path) 
+                {
                     for (ms, avg_lat) in sorted_avg_lat_map.iter() {
                         writeln!(file, "{},{}", ms, avg_lat).expect("Failed to write to file");
                     }
@@ -874,7 +880,7 @@ fn run_client_worker(
         if live_mode2 {
             return;
         }
-        return;
+        // return;
         backend.sleep(last + Duration::from_millis(500));
         // unblock the writer thread if needed
         let mut prev_nsent = nsent;
@@ -905,9 +911,9 @@ fn run_client_worker(
             backend.sleep(packet.target_start - t);
             t = start.elapsed();
         }
-        // if !live_mode && t > packet.target_start + Duration::from_micros(5) {
-        //     continue;
-        // }
+        if !live_mode && t > packet.target_start + Duration::from_micros(5) {
+            continue;
+        }
 
         packet.actual_start = Some(start.elapsed());
         if let Err(e) = (&*socket).write_all(&payload[..]) {
