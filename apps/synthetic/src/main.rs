@@ -1233,57 +1233,71 @@ fn run_local(
         .all(|p| p)
 }
 
-/// The values returned are the *actual* PPS, not the million PPS.
 fn get_zipf_distribution(
-    million_packets_per_second: usize,
+    total_pps: usize,
+    alpha: u32,
     nthreads: usize
-) -> impl Iterator<Item = usize> {
-    let total_pps = (million_packets_per_second * 1_000_000) as f64;
-    let c = total_pps / ((2 * nthreads - 1) as f64).ln();
-    (1..nthreads + 1).map(move |i| (c / i as f64) as usize)
+) -> impl Iterator<Item = f64> {
+    /*
+        zipf = [0] * n
+        c = 0.0
+        for i in range(n):
+            c = c + (1.0 / (i+1)**alpha)
+        c = 1 / c
+        for i in range(n):
+            zipf[i] = (c / (i+1)**alpha)
+        return zipf
+    */
+
+    let c = (1..nthreads + 1)
+        .fold(0.0, |acc, i| acc + (i.pow(alpha) as f64).recip())
+        .recip();
+
+    (1..nthreads + 1).map(move |i| (total_pps as f64 * (c / i.pow(alpha) as f64)))
 }
 
 fn zipf_gen_classic_packet_schedule(
     runtime: Duration,
-    actual_packets_per_second: usize,
+    pps: f64,
     output: OutputMode,
     distribution: Distribution,
     ramp_up_seconds: usize,
-    nthreads: usize,
     discard_pct: f32,
 ) -> Vec<RequestSchedule> {
     let mut sched: Vec<RequestSchedule> = Vec::new();
 
     /* Ramp up in 100ms increments */
     for t in 1..(10 * ramp_up_seconds) {
-        let rate = t * actual_packets_per_second / (ramp_up_seconds * 10);
+        let rate = t as f64 * pps / (ramp_up_seconds as f64 * 10.0);
 
-        if rate / 1_000_000 == 0 {
+        if rate as usize / 1000 == 0 {
             continue;
         }
 
-        println!("{} pps : {} ns", rate, nthreads * 1000_000_000_000_000 / rate);
+        let ns_per_packet = 1_000_000_000.0 / rate;
+
+        // println!("{} pps : {} ns", rate as usize, ns_per_packet as usize);
 
         sched.push(RequestSchedule {
-            arrival: Distribution::Exponential((nthreads * 1000_000_000_000_000 / rate) as f64),
+            arrival: Distribution::Exponential(ns_per_packet as f64),
             service: distribution,
             output: OutputMode::Silent,
             runtime: Duration::from_millis(100),
-            rps: rate,
+            rps: rate as usize,
             discard_pct: 0.0,
         });
     }
 
-    let ns_per_packet = nthreads * 1000_000_000_000_000 / actual_packets_per_second;
+    let ns_per_packet = 1_000_000_000.0 / pps;
 
-    println!("{} pps : {} ns", actual_packets_per_second, ns_per_packet);
+    println!("{} pps : {} ns per packet", pps as usize, ns_per_packet as usize);
 
     sched.push(RequestSchedule {
         arrival: Distribution::Exponential(ns_per_packet as f64),
         service: distribution,
         output: output,
         runtime: runtime,
-        rps: actual_packets_per_second,
+        rps: pps as usize,
         discard_pct: discard_pct,
     });
 
@@ -1558,6 +1572,7 @@ fn main() {
         .arg(
             Arg::with_name("zipf")
                 .long("zipf")
+                .takes_value(true)
                 .help("enable ZIPF distribution for PPS over threads"),
         )
         .args(&SyntheticProtocol::args())
@@ -1646,7 +1661,17 @@ fn main() {
         return;
     }
 
-    let zipf = matches.is_present("zipf");
+    let zipf = matches.value_of("zipf")
+        .map(|alpha| alpha.parse::<u32>().unwrap())
+        .filter(|&alpha| if nthreads == 1 {
+            eprintln!("WARNING: ZIPF distribution was selected with only 1 thread.");
+            false
+        } else if alpha == 0 {
+            eprintln!("WARNING: Alpha = 0 is a uniform distribution.");
+            false
+        } else {
+            true
+        });
 
     match mode {
         "spawner-server" => match tport {
@@ -1801,8 +1826,8 @@ fn main() {
                     backend.sleep(Duration::from_secs(intersample_sleep));
                 }
 
-                if zipf && nthreads > 1 {
-                    let pps_distribution = get_zipf_distribution(packets_per_second, nthreads);
+                if let Some(alpha) = zipf {
+                    let pps_distribution = get_zipf_distribution(packets_per_second, alpha, nthreads);
 
                     let schedules = pps_distribution.map(|pps| {
                         Arc::new(zipf_gen_classic_packet_schedule(
@@ -1811,7 +1836,6 @@ fn main() {
                             output,
                             distribution,
                             rampup,
-                            1,
                             discard_pct
                         ))
                     }).collect_vec();
