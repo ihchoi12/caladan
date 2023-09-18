@@ -422,7 +422,7 @@ fn gen_classic_packet_schedule(
             continue;
         }
 
-        println!("{} pps : {} ns", rate, nthreads * 1000_000_000 / rate);
+        // println!("{} pps : {} ns", rate, nthreads * 1000_000_000 / rate);
 
         sched.push(RequestSchedule {
             arrival: Distribution::Exponential((nthreads * 1000_000_000 / rate) as f64),
@@ -436,7 +436,7 @@ fn gen_classic_packet_schedule(
 
     let ns_per_packet = nthreads * 1000_000_000 / packets_per_second;
 
-    println!("{} pps : {} ns", packets_per_second, ns_per_packet);
+    // println!("{} pps : {} ns", packets_per_second, ns_per_packet);
 
     sched.push(RequestSchedule {
         arrival: Distribution::Exponential(ns_per_packet as f64),
@@ -1431,7 +1431,7 @@ fn main() {
                 .long("pps")
                 .takes_value(true)
                 .default_value("10000")
-                .help("How many *million* packets should be sent per second"),
+                .help("How many packets should be sent per second"),
         )
         .arg(
             Arg::with_name("start_pps")
@@ -1743,7 +1743,7 @@ fn main() {
                     },
                     ("resp", _) => {
                         let protocol = RespProtocol::with_args(&matches, Transport::Tcp);
-                        protocol.preload_servers(backend, Transport::Tcp, addrs[0]);
+                        // protocol.preload_servers(backend, Transport::Tcp, addrs[0]);
                     }
                     _ => (),
                 };
