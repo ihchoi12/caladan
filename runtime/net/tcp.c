@@ -145,7 +145,7 @@ static void tcp_worker(void *arg)
 		spin_unlock_np(&tcp_lock);
 
 		if (!again)
-			timer_sleep(10 * ONE_MS);
+			timer_sleep(500 * ONE_US);
 	}
 }
 

@@ -26,7 +26,7 @@ use crate::backend::Backend;
 const STRING_KEY_BASE: &str = "string";
 const LIST_KEY_BASE: &str = "list";
 
-const WRITE_PROBABILITY: i32 = 20;
+const WRITE_PROBABILITY: i32 = 0;
 
 /*#############################################################################
     ENUMERATIONS
@@ -203,6 +203,7 @@ impl RespProtocol {
         tport: Transport,
         addr: SocketAddrV4,
     ) {
+        eprintln!("preload {:?}", addr);
         if let Transport::Udp = tport {
             panic!("udp is unsupported for resp");
         }
