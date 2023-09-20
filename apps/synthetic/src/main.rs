@@ -19,7 +19,7 @@ use arrayvec::ArrayVec;
 
 use std::collections::{BTreeMap, HashMap};
 use std::f32::INFINITY;
-use std::io;
+use std::{io, result};
 use std::io::{Error, ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::slice;
@@ -371,6 +371,7 @@ struct RequestSchedule {
     discard_pct: f32,
 }
 
+#[derive(Clone)]
 struct TraceResult {
     actual_start: Option<Duration>,
     target_start: Duration,
@@ -390,6 +391,7 @@ impl PartialEq for TraceResult {
     }
 }
 
+#[derive(Clone)]
 struct ScheduleResult {
     packet_count: usize,
     drop_count: usize,
@@ -888,7 +890,7 @@ fn run_client_worker(
         backend.sleep(last + Duration::from_millis(500));
         // unblock the writer thread if needed
         let mut prev_nsent = nsent;
-        while true {
+        loop {
             backend.sleep(Duration::from_secs(1));
             if prev_nsent == nsent {
                 break;
@@ -1296,18 +1298,281 @@ fn zipf_gen_classic_packet_schedule(
 
     let ns_per_packet = 1_000_000_000.0 / pps;
 
-    println!("{} pps : {} ns per packet", pps as usize, ns_per_packet as usize);
+    // println!("{} pps : {} ns per packet", pps as usize, ns_per_packet as usize);
 
     sched.push(RequestSchedule {
         arrival: Distribution::Exponential(ns_per_packet as f64),
         service: distribution,
-        output: output,
-        runtime: runtime,
+        output,
+        runtime,
         rps: pps as usize,
-        discard_pct: discard_pct,
+        discard_pct,
     });
 
     sched
+}
+
+fn zipf_gen_loadshift_experiment(
+    spec: &str,
+    service: Distribution,
+    nthreads: usize,
+    output: OutputMode,
+) -> Vec<RequestSchedule> {
+    spec.split(",")
+        .map(|step_spec| {
+            let s: Vec<&str> = step_spec.split(":").collect();
+            assert!(s.len() >= 2 && s.len() <= 3);
+            let packets_per_second: u64 = s[0].parse().unwrap();
+            let ns_per_packet = nthreads as u64 * 1000_000_000 / packets_per_second;
+            let micros = s[1].parse().unwrap();
+            let output = match s.len() {
+                2 => output,
+                3 => OutputMode::Silent,
+                _ => unreachable!(),
+            };
+            RequestSchedule {
+                arrival: Distribution::Exponential(ns_per_packet as f64),
+                service,
+                output,
+                runtime: Duration::from_micros(micros),
+                rps: packets_per_second as usize,
+                discard_pct: 0.0,
+            }
+        })
+        .collect()
+}
+
+fn zipf_process_result_final(
+    scheds: Vec<RequestSchedule>,
+    results: Vec<ScheduleResult>,
+    wct_start: SystemTime,
+    sched_start: Duration,
+) -> bool {
+    let mut buckets: BTreeMap<u64, usize> = BTreeMap::new();
+    let mut latencies_raw: Vec<u64> = Vec::new();
+
+    let packet_count = results.iter().map(|res| res.packet_count).sum::<usize>();
+    let drop_count = results.iter().map(|res| res.drop_count).sum::<usize>();
+    let never_sent_count = results
+        .iter()
+        .map(|res| res.never_sent_count)
+        .sum::<usize>();
+    let first_send = results.iter().filter_map(|res| res.first_send).min();
+    let last_send = results.iter().filter_map(|res| res.last_send).max();
+    let last_recv = results.iter().filter_map(|res| res.last_recv).max();
+    let first_tsc = results.iter().filter_map(|res| res.first_tsc).min();
+    let start_unix = wct_start + sched_start;
+
+    if let OutputMode::Silent = scheds[0].output {
+        return true;
+    }
+
+    let rps = scheds.iter().map(|e| e.rps).sum::<usize>();
+
+    if packet_count <= 1 {
+        println!(
+            "\n[FINAL RESULT] {}, {}, 0, {}, {}, {}",
+            scheds[0].service.name(),
+            rps,
+            drop_count,
+            never_sent_count,
+            start_unix.duration_since(UNIX_EPOCH).unwrap().as_secs()
+        );
+        return false;
+    }
+
+    results.iter().for_each(|res| {
+        for (k, v) in &res.latencies {
+            *buckets.entry(*k).or_insert(0) += v;
+        }
+        for lat in &res.latencies_raw {
+            latencies_raw.push(*lat);
+        }
+    });
+
+    let percentile = |p| {
+        let idx = ((packet_count + drop_count) as f32 * p / 100.0) as usize;
+        if idx >= packet_count {
+            return INFINITY;
+        }
+
+        let mut seen = 0;
+        for k in buckets.keys() {
+            seen += buckets[k];
+            if seen >= idx {
+                return *k as f32;
+            }
+        }
+        return INFINITY;
+    };
+
+    if let OutputMode::Live = scheds[0].output {
+        println!(
+            "RPS: {}\tMedian (us): {: <7}\t99th (us): {: <7}\t99.9th (us): {: <7}",
+            rps,
+            percentile(50.0) as usize,
+            percentile(99.0) as usize,
+            percentile(99.9) as usize
+        );
+        return true;
+    }
+
+    let first_send = first_send.unwrap();
+    let start_unix = wct_start + first_send;
+
+    let target = results.iter().map(|res| {
+        (res.packet_count + res.drop_count) as u64 * 1000_000_000
+            / duration_to_ns(res.last_send.unwrap() - res.first_send.unwrap())
+    }).fold(0, |s, e| s + e);
+
+    let actual = results.iter().map(|res| {
+        res.packet_count as u64 * 1000_000_000 / duration_to_ns(res.last_recv.unwrap() - res.first_send.unwrap())
+    }).fold(0, |s, e| s + e);
+
+    println!(
+        "\n[FINAL RESULT] {}, {}, {}, {}, {}, {}, {:.1}, {:.1}, {:.1}, {:.1}, {:.1}, {}, {}",
+        scheds[0].service.name(),
+        rps,
+        target,
+        actual,
+        drop_count,
+        never_sent_count,
+        percentile(50.0),
+        percentile(90.0),
+        percentile(99.0),
+        percentile(99.9),
+        percentile(99.99),
+        start_unix.duration_since(UNIX_EPOCH).unwrap().as_secs(),
+        first_tsc.unwrap()
+    );
+
+    
+    unsafe {
+        if let Some(exptid) = &EXPTID {
+            if exptid != "null" {
+                if let Ok(mut file) = File::create(format!("{}.latency", exptid)) {
+                    let mut latencies: Vec<f64> = Vec::new();
+                    let mut counts: Vec<usize> = Vec::new();
+
+                    for (k, v) in buckets.iter() {
+                        latencies.push(*k as f64);
+                        counts.push(*v);
+                    }
+
+                    let total_count: u32 = counts.iter().map(|&count| count as u32).sum();
+                    
+                    
+                    write!(file, "Latencies: \n").expect("Failed to write to file");
+                    let mut cumulative_percentage = 0.0;
+                    for (k, v) in buckets.iter() {
+                        let percentage = (*v as f64 / total_count as f64) * 100.0; // Calculate the percentage
+                        cumulative_percentage += percentage;
+                        write!(file, "{},{},{:.2}\n", k, buckets[k], cumulative_percentage).expect("Failed to write to file");
+                    }
+                    writeln!(file, "").expect("Failed to write to file");
+                    
+                    
+                    let mean: f64 = latencies.iter().zip(counts.iter()).map(|(&l, &c)| l * c as f64).sum::<f64>() / total_count as f64;
+                    let squared_diffs: Vec<f64> = latencies.iter().map(|&x| (x - mean).powi(2)).collect();
+                    let variance: f64 = squared_diffs.iter().sum::<f64>() / total_count as f64;
+                    let standard_deviation: f64 = variance.sqrt();
+                    // let sqdiff = squared_diffs.iter().sum::<f64>();
+                    // writeln!(file, "Total Count: {}", total_count).expect("Failed to write to file");
+                    writeln!(file, "Mean: {:.2}", mean).expect("Failed to write to file");
+                    // writeln!(file, "squared_diffs: {:.2}", sqdiff).expect("Failed to write to file");
+                    // writeln!(file, "variance: {:.2}", variance).expect("Failed to write to file");
+                    writeln!(file, "Standard Deviation: {:.2}", standard_deviation).expect("Failed to write to file");
+
+                } else {
+                    eprintln!("Failed to create file {}.latency", exptid);
+                }
+
+                if let Ok(mut file) = File::create(format!("{}.latency_raw", exptid)) {
+                    for (index, latency) in latencies_raw.iter().enumerate() {
+                        writeln!(file, "{},{}", index, latency)
+                            .expect("Failed to write to file");
+                    }
+                } else {
+                    eprintln!("Failed to create file {}..latency_raw", exptid);
+                }
+            }
+        }
+    }
+
+
+    if let OutputMode::Trace = scheds[0].output {
+        let mut cnt_map: HashMap<u64, u64> = HashMap::new();
+        let mut sum_lat_map: HashMap<u64, u64> = HashMap::new();
+        
+        for p in results.into_iter().filter_map(|p| p.trace).kmerge() {
+            
+            if let Some(completion_time) = p.completion_time {
+                let actual_start = p.actual_start.unwrap();
+                // println!(
+                //     "{},{}",
+                //     duration_to_ns(actual_start),
+                //     // duration_to_ns(actual_start) as i64 - duration_to_ns(p.target_start) as i64,
+                //     duration_to_ns(completion_time - actual_start),
+                //     // p.server_tsc,
+                // )
+                let ms = ( (duration_to_ns(actual_start) / 1000000) / 10 ) * 10;
+                let lat = duration_to_ns(completion_time - actual_start) as u64 / 1000;
+
+                let count = cnt_map.entry(ms).or_insert(0);
+                *count += 1;
+
+                let sum_lat = sum_lat_map.entry(ms).or_insert(0);
+                *sum_lat += lat;
+            } 
+            // else if p.actual_start.is_some() {
+            //     let actual_start = p.actual_start.unwrap();
+            //     print!(
+            //         "{}:{}:-1:-1 ",
+            //         duration_to_ns(actual_start),
+            //         duration_to_ns(actual_start) as i64 - duration_to_ns(p.target_start) as i64,
+            //     )
+            // } else {
+            //     print!("{}:-1:-1:-1 ", duration_to_ns(p.target_start))
+            // }
+        }
+        let mut avg_lat_map: HashMap<u64, u64> = HashMap::new();
+        for (ms, count) in &cnt_map {
+            if let Some(&sum_lat) = sum_lat_map.get(ms) {
+                let avg_lat = sum_lat / *count;
+                avg_lat_map.insert(*ms, avg_lat);
+            }
+        }
+
+        // Convert avg_lat_map into a BTreeMap for sorting by keys
+        let sorted_avg_lat_map: BTreeMap<u64, u64> = avg_lat_map.into_iter().collect();
+        
+        if let Some(exptid) = unsafe {&EXPTID} {
+            if exptid != "null" {
+                let file_path = format!("{}.latency_trace", exptid);
+                // Open the file in append mode using OpenOptions
+                if let Ok(mut file) = OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(&file_path) 
+                {
+                    for (ms, avg_lat) in sorted_avg_lat_map.iter() {
+                        writeln!(file, "{},{}", ms, avg_lat).expect("Failed to write to file");
+                    }
+                }
+            }
+            else {
+                // Iterate and print the elements in ascending order of keys
+                for (ms, avg_lat) in sorted_avg_lat_map.iter() {
+                    println!("{},{}", ms, avg_lat);
+                }
+            }
+        }
+        
+
+        // println!("");
+    }
+
+    true
 }
 
 fn zipf_run_client(
@@ -1361,9 +1626,49 @@ fn zipf_run_client(
         .map(|s| s.join().unwrap())
         .collect();
 
-    let mut sched_start = Duration::from_nanos(100_000_000);
+    let sched_start = Duration::from_nanos(100_000_000);
 
-    schedules
+    let results = schedules.iter()
+        .zip(packets.into_iter())
+        .filter_map(|(schedules, packets)| {
+            let last = packets.into_iter().last();
+            if last.is_none() || last.as_ref().unwrap().is_none() { return None }
+            let last = last.unwrap().unwrap();
+
+            let sched = schedules[schedules.len() - 1];
+            let sched_start = schedules.iter().fold(sched_start, |sum, e| sum + e.runtime);
+
+            Some((sched, last, sched_start))
+        })
+        .collect_vec();
+
+    if results.is_empty() {
+        return true;
+    }
+
+    let ret = results.iter()
+        .map(|(sched, last, sched_start)| {
+            process_result_final(sched, vec![last.clone()], start_unix, *sched_start)
+        })
+        .collect_vec()
+        .into_iter()
+        .all(|p| p);
+
+    let (scheds, results, sched_starts) = results.into_iter()
+        .fold(
+            (vec![], vec![], vec![]),
+            |(mut a, mut b, mut c), (ai, bi, ci)| {
+                a.push(ai);
+                b.push(bi);
+                c.push(ci);
+                (a, b, c)
+            }
+        );
+
+    let sched_start = sched_starts.into_iter().min().unwrap();
+
+    zipf_process_result_final(scheds, results, start_unix, sched_start) && ret
+    /* schedules
         .iter()
         .zip(packets.into_iter())
         .map(|(schedules, packets)| {
@@ -1382,7 +1687,7 @@ fn zipf_run_client(
         })
         .collect_vec()
         .into_iter()
-        .all(|p| p)
+        .all(|p| p) */
 }
 
 fn main() {
