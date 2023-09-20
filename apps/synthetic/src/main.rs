@@ -1343,6 +1343,7 @@ fn zipf_gen_loadshift_experiment(
 }
 
 fn zipf_process_result_final(
+    total_pps: usize,
     scheds: Vec<RequestSchedule>,
     results: Vec<ScheduleResult>,
     wct_start: SystemTime,
@@ -1367,13 +1368,13 @@ fn zipf_process_result_final(
         return true;
     }
 
-    let rps = scheds.iter().map(|e| e.rps).sum::<usize>();
+    // let rps = scheds.iter().map(|e| e.rps).sum::<usize>();
 
     if packet_count <= 1 {
         println!(
-            "\n[FINAL RESULT] {}, {}, 0, {}, {}, {}",
+            "\n\n[RESULT] {}, {}, 0, {}, {}, {}",
             scheds[0].service.name(),
-            rps,
+            total_pps,
             drop_count,
             never_sent_count,
             start_unix.duration_since(UNIX_EPOCH).unwrap().as_secs()
@@ -1409,7 +1410,7 @@ fn zipf_process_result_final(
     if let OutputMode::Live = scheds[0].output {
         println!(
             "RPS: {}\tMedian (us): {: <7}\t99th (us): {: <7}\t99.9th (us): {: <7}",
-            rps,
+            total_pps,
             percentile(50.0) as usize,
             percentile(99.0) as usize,
             percentile(99.9) as usize
@@ -1430,9 +1431,9 @@ fn zipf_process_result_final(
     }).fold(0, |s, e| s + e);
 
     println!(
-        "\n[FINAL RESULT] {}, {}, {}, {}, {}, {}, {:.1}, {:.1}, {:.1}, {:.1}, {:.1}, {}, {}",
+        "\n\n[RESULT] {}, {}, {}, {}, {}, {}, {:.1}, {:.1}, {:.1}, {:.1}, {:.1}, {}, {}",
         scheds[0].service.name(),
-        rps,
+        total_pps,
         target,
         actual,
         drop_count,
@@ -1576,6 +1577,7 @@ fn zipf_process_result_final(
 }
 
 fn zipf_run_client(
+    total_pps: usize,
     proto: Arc<Box<dyn LoadgenProtocol>>,
     backend: Backend,
     addrs: &Vec<SocketAddrV4>,
@@ -1667,7 +1669,7 @@ fn zipf_run_client(
 
     let sched_start = sched_starts.into_iter().min().unwrap();
 
-    zipf_process_result_final(scheds, results, start_unix, sched_start) && ret
+    zipf_process_result_final(total_pps, scheds, results, start_unix, sched_start) && ret
     /* schedules
         .iter()
         .zip(packets.into_iter())
@@ -2152,6 +2154,7 @@ fn main() {
                     }).collect_vec();
 
                     zipf_run_client(
+                        packets_per_second,
                         proto,
                         backend,
                         &addrs,
