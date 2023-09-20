@@ -1241,7 +1241,7 @@ fn run_local(
 
 fn get_zipf_distribution(
     total_pps: usize,
-    alpha: u32,
+    alpha: f64,
     nthreads: usize
 ) -> impl Iterator<Item = f64> {
     /*
@@ -1256,10 +1256,10 @@ fn get_zipf_distribution(
     */
 
     let c = (1..nthreads + 1)
-        .fold(0.0, |acc, i| acc + (i.pow(alpha) as f64).recip())
+        .fold(0.0, |acc, i| acc + (i as f64).powf(alpha).recip())
         .recip();
 
-    (1..nthreads + 1).map(move |i| (total_pps as f64 * (c / i.pow(alpha) as f64)))
+    (1..nthreads + 1).map(move |i| (total_pps as f64 * (c / (i as f64).powf(alpha))))
 }
 
 fn zipf_gen_classic_packet_schedule(
@@ -1668,11 +1668,11 @@ fn main() {
     }
 
     let zipf = matches.value_of("zipf")
-        .map(|alpha| alpha.parse::<u32>().unwrap())
+        .map(|alpha| alpha.parse::<f64>().unwrap())
         .filter(|&alpha| if nthreads == 1 {
             eprintln!("WARNING: ZIPF distribution was selected with only 1 thread.");
             false
-        } else if alpha == 0 {
+        } else if alpha == 0.0 {
             eprintln!("WARNING: Alpha = 0 is a uniform distribution.");
             false
         } else {
