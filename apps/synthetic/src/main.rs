@@ -1287,7 +1287,7 @@ fn zipf_gen_classic_packet_schedule(
         // println!("{} pps : {} ns", rate as usize, ns_per_packet as usize);
 
         sched.push(RequestSchedule {
-            arrival: Distribution::Exponential(ns_per_packet as f64),
+            arrival: Distribution::Exponential(ns_per_packet),
             service: distribution,
             output: OutputMode::Silent,
             runtime: Duration::from_millis(100),
@@ -1301,7 +1301,7 @@ fn zipf_gen_classic_packet_schedule(
     // println!("{} pps : {} ns per packet", pps as usize, ns_per_packet as usize);
 
     sched.push(RequestSchedule {
-        arrival: Distribution::Exponential(ns_per_packet as f64),
+        arrival: Distribution::Exponential(ns_per_packet),
         service: distribution,
         output,
         runtime,
@@ -1316,30 +1316,41 @@ fn zipf_gen_loadshift_experiment(
     spec: &str,
     service: Distribution,
     nthreads: usize,
+    alpha: f64,
     output: OutputMode,
-) -> Vec<RequestSchedule> {
+) -> Vec<Vec<RequestSchedule>> {
     spec.split(",")
-        .map(|step_spec| {
-            let s: Vec<&str> = step_spec.split(":").collect();
-            assert!(s.len() >= 2 && s.len() <= 3);
-            let packets_per_second: u64 = s[0].parse().unwrap();
-            let ns_per_packet = nthreads as u64 * 1000_000_000 / packets_per_second;
-            let micros = s[1].parse().unwrap();
-            let output = match s.len() {
-                2 => output,
-                3 => OutputMode::Silent,
-                _ => unreachable!(),
-            };
-            RequestSchedule {
-                arrival: Distribution::Exponential(ns_per_packet as f64),
-                service,
-                output,
-                runtime: Duration::from_micros(micros),
-                rps: packets_per_second as usize,
-                discard_pct: 0.0,
+        .fold(
+            vec![vec![]; nthreads],
+            |mut acc, step_spec| {
+                let s: Vec<&str> = step_spec.split(":").collect();
+                assert!(s.len() >= 2 && s.len() <= 3);
+                let packets_per_second: u64 = s[0].parse().unwrap();
+                let micros = s[1].parse().unwrap();
+                let output = match s.len() {
+                    2 => output,
+                    3 => OutputMode::Silent,
+                    _ => unreachable!(),
+                };
+    
+                get_zipf_distribution(packets_per_second as usize, alpha, nthreads)
+                    .enumerate()
+                    .for_each(|(i, pps)| {
+                        let ns_per_packet = 1_000_000_000.0 / pps;
+                        acc[i].push(
+                            RequestSchedule {
+                                arrival: Distribution::Exponential(ns_per_packet),
+                                service,
+                                output,
+                                runtime: Duration::from_micros(micros),
+                                rps: pps as usize,
+                                discard_pct: 0.0,
+                            }
+                        );
+                    });
+                acc
             }
-        })
-        .collect()
+        )
 }
 
 fn zipf_process_result_final(
@@ -1368,7 +1379,7 @@ fn zipf_process_result_final(
         return true;
     }
 
-    // let rps = scheds.iter().map(|e| e.rps).sum::<usize>();
+    // let total_pps = scheds.iter().map(|e| e.rps).sum::<usize>();
 
     if packet_count <= 1 {
         println!(
@@ -1630,7 +1641,23 @@ fn zipf_run_client(
 
     let sched_start = Duration::from_nanos(100_000_000);
 
-    let results = schedules.iter()
+    let results = schedules.into_iter()
+        .zip(packets.into_iter())
+        .map(|(schedules, packets)| {
+            let mut sched_start = sched_start;
+            schedules.iter()
+                .zip(packets.into_iter())
+                .filter_map(|(sched, packet)| {
+                    let old_sched_start = sched_start;
+                    sched_start += sched.runtime;
+                    if let OutputMode::Silent = sched.output { None }
+                    else { Some((*sched, packet.expect("thread had zero results"), old_sched_start)) }
+                })
+                .collect_vec()
+        })
+        .collect_vec();
+
+    /* let results = schedules.iter()
         .zip(packets.into_iter())
         .filter_map(|(schedules, packets)| {
             let last = packets.into_iter().last();
@@ -1638,38 +1665,53 @@ fn zipf_run_client(
             let last = last.unwrap().unwrap();
 
             let sched = schedules[schedules.len() - 1];
-            let sched_start = schedules.iter().fold(sched_start, |sum, e| sum + e.runtime);
+            let sched_start = schedules.iter().fold(sched_start, |sum, e| sum + e.runtime) - sched.runtime;
 
             Some((sched, last, sched_start))
         })
-        .collect_vec();
+        .collect_vec(); */
 
-    if results.is_empty() {
-        return true;
-    }
+    assert!(results.iter().fold(true, |acc, e| acc && e.len() == results[0].len()));
 
-    let ret = results.iter()
-        .map(|(sched, last, sched_start)| {
-            process_result_final(sched, vec![last.clone()], start_unix, *sched_start)
-        })
-        .collect_vec()
-        .into_iter()
-        .all(|p| p);
-
-    let (scheds, results, sched_starts) = results.into_iter()
+    let runs = results[0].len();
+    let results = results.into_iter()
         .fold(
-            (vec![], vec![], vec![]),
-            |(mut a, mut b, mut c), (ai, bi, ci)| {
-                a.push(ai);
-                b.push(bi);
-                c.push(ci);
-                (a, b, c)
+            vec![vec![]; runs],
+            |mut acc, e| {
+                e.into_iter().enumerate()
+                    .for_each(|(i, e)| acc[i].push(e));
+                acc
             }
         );
 
-    let sched_start = sched_starts.into_iter().min().unwrap();
+    let mut ret = true;
+    for results in results {
+        ret = results.iter()
+            .map(|(sched, last, sched_start)| {
+                process_result_final(sched, vec![last.clone()], start_unix, *sched_start)
+            })
+            .collect_vec()
+            .into_iter()
+            .all(|p| p) && ret;
 
-    zipf_process_result_final(total_pps, scheds, results, start_unix, sched_start) && ret
+        let (scheds, results, sched_starts) = results.into_iter()
+            .fold(
+                (vec![], vec![], vec![]),
+                |(mut a, mut b, mut c), (ai, bi, ci)| {
+                    a.push(ai);
+                    b.push(bi);
+                    c.push(ci);
+                    (a, b, c)
+                }
+            );
+
+        let sched_start = sched_starts.into_iter().min().unwrap();
+
+        ret = zipf_process_result_final(total_pps, scheds, results, start_unix, sched_start) && ret;
+        println!("\n*******************************************\n");
+    }
+
+    ret
     /* schedules
         .iter()
         .zip(packets.into_iter())
@@ -2096,17 +2138,34 @@ fn main() {
                 }
 
                 if !loadshift_spec.is_empty() {
-                    let sched = gen_loadshift_experiment(&loadshift_spec, distribution, nthreads, output);
-                    run_client(
-                        proto,
-                        backend,
-                        &addrs,
-                        nthreads,
-                        tport,
-                        &mut barrier_group,
-                        sched,
-                        0,
-                    );
+                    if let Some(alpha) = zipf {    
+                        let schedules = zipf_gen_loadshift_experiment(&loadshift_spec, distribution, nthreads, alpha, output);
+                        let schedules = schedules.into_iter().map(|e| Arc::new(e)).collect();
+
+                        zipf_run_client(
+                            packets_per_second,
+                            proto,
+                            backend,
+                            &addrs,
+                            nthreads,
+                            tport,
+                            &mut barrier_group,
+                            schedules,
+                            1
+                        );
+                    } else {
+                        let sched = gen_loadshift_experiment(&loadshift_spec, distribution, nthreads, output);
+                        run_client(
+                            proto,
+                            backend,
+                            &addrs,
+                            nthreads,
+                            tport,
+                            &mut barrier_group,
+                            sched,
+                            0,
+                        );
+                    }
                     if let Some(ref mut g) = barrier_group {
                         g.barrier();
                     }
@@ -2165,6 +2224,9 @@ fn main() {
                         1
                     );
 
+                    if let Some(ref mut g) = barrier_group {
+                        g.barrier();
+                    }
                     return;
                 }
 
