@@ -29,7 +29,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{App, Arg};
-use itertools::Itertools;
+use itertools::{Itertools, Either};
 use mersenne_twister::MersenneTwister;
 use rand::distributions::{Exp, IndependentSample};
 use rand::{Rng, SeedableRng};
@@ -1318,11 +1318,11 @@ fn zipf_gen_loadshift_experiment(
     nthreads: usize,
     alpha: f64,
     output: OutputMode,
-) -> Vec<Vec<RequestSchedule>> {
+) -> (Vec<Vec<RequestSchedule>>, Vec<usize>) {
     spec.split(",")
         .fold(
-            vec![vec![]; nthreads],
-            |mut acc, step_spec| {
+            (vec![vec![]; nthreads], vec![]),
+            |(mut acc, mut ppss), step_spec| {
                 let s: Vec<&str> = step_spec.split(":").collect();
                 assert!(s.len() >= 2 && s.len() <= 3);
                 let packets_per_second: u64 = s[0].parse().unwrap();
@@ -1333,6 +1333,7 @@ fn zipf_gen_loadshift_experiment(
                     _ => unreachable!(),
                 };
     
+                ppss.push(packets_per_second as usize);
                 get_zipf_distribution(packets_per_second as usize, alpha, nthreads)
                     .enumerate()
                     .for_each(|(i, pps)| {
@@ -1348,7 +1349,7 @@ fn zipf_gen_loadshift_experiment(
                             }
                         );
                     });
-                acc
+                (acc, ppss)
             }
         )
 }
@@ -1588,7 +1589,7 @@ fn zipf_process_result_final(
 }
 
 fn zipf_run_client(
-    total_pps: usize,
+    total_ppss: Vec<usize>,
     proto: Arc<Box<dyn LoadgenProtocol>>,
     backend: Backend,
     addrs: &Vec<SocketAddrV4>,
@@ -1685,7 +1686,7 @@ fn zipf_run_client(
         );
 
     let mut ret = true;
-    for results in results {
+    for (results, total_pps) in results.into_iter().zip(total_ppss) {
         ret = results.iter()
             .map(|(sched, last, sched_start)| {
                 process_result_final(sched, vec![last.clone()], start_unix, *sched_start)
@@ -2139,11 +2140,11 @@ fn main() {
 
                 if !loadshift_spec.is_empty() {
                     if let Some(alpha) = zipf {    
-                        let schedules = zipf_gen_loadshift_experiment(&loadshift_spec, distribution, nthreads, alpha, output);
+                        let (schedules, ppss) = zipf_gen_loadshift_experiment(&loadshift_spec, distribution, nthreads, alpha, output);
                         let schedules = schedules.into_iter().map(|e| Arc::new(e)).collect();
 
                         zipf_run_client(
-                            packets_per_second,
+                            ppss,
                             proto,
                             backend,
                             &addrs,
@@ -2213,7 +2214,7 @@ fn main() {
                     }).collect_vec();
 
                     zipf_run_client(
-                        packets_per_second,
+                        vec![packets_per_second],
                         proto,
                         backend,
                         &addrs,
