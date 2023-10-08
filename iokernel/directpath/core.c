@@ -29,7 +29,7 @@ static struct directpath_ctx *preallocated_ctx[MAX_PREALLOC];
 static unsigned int nr_prealloc;
 
 struct ibv_context *vfcontext;
-struct cq *cqn_to_cq_map[MAX_CQ];
+struct cq_map_entry cqn_to_cq_map[MAX_CQ];
 struct mlx5dv_devx_uar *admin_uar;
 
 static unsigned char rss_key[40] = {
@@ -133,6 +133,74 @@ static int mlx5_modify_nic_vport_set_mac(uint8_t *mac)
 	return 0;
 }
 
+int directpath_query_cq(uint32_t cqn)
+{
+	uint32_t in[DEVX_ST_SZ_DW(query_cq_in)] = {0};
+	uint32_t out[DEVX_ST_SZ_DW(query_cq_out)];
+
+
+	DEVX_SET(query_cq_in, in, opcode, MLX5_CMD_OP_QUERY_CQ);
+	DEVX_SET(query_cq_in, in, cqn, cqn);
+
+	int ret = mlx5dv_devx_general_cmd(vfcontext, in, sizeof(in), out, sizeof(out));
+	if (ret) {
+		LOG_CMD_FAIL("query cq", query_cq_out, out);
+		return ret;
+	}
+
+	log_err("cq status is ok: %d", DEVX_GET(query_cq_out, out, cq_context.status) == 0);
+	log_err("cq head: %x", DEVX_GET(query_cq_out, out, cq_context.consumer_counter));
+	log_err("cq tail: %x", DEVX_GET(query_cq_out, out, cq_context.producer_counter));
+	return 0;
+}
+
+static void print_wq_status(void *wq)
+{
+	log_err("wq head: %x", DEVX_GET(wq, wq, sw_counter));
+	log_err("wq tail: %x", DEVX_GET(wq, wq, hw_counter));
+}
+
+int directpath_query_rq(uint32_t rqn)
+{
+	uint32_t in[DEVX_ST_SZ_DW(query_rq_in)] = {0};
+	uint32_t out[DEVX_ST_SZ_DW(query_rq_out)];
+
+
+	DEVX_SET(query_rq_in, in, opcode, MLX5_CMD_OP_QUERY_RQ);
+	DEVX_SET(query_rq_in, in, rqn, rqn);
+
+	int ret = mlx5dv_devx_general_cmd(vfcontext, in, sizeof(in), out, sizeof(out));
+	if (ret) {
+		LOG_CMD_FAIL("query rq", query_rq_out, out);
+		return ret;
+	}
+
+	log_err("rq status is ok: %d", DEVX_GET(query_rq_out, out, rq_context.state) == 1);
+	print_wq_status(DEVX_ADDR_OF(query_rq_out, out, rq_context.wq));
+	return 0;
+}
+
+int directpath_query_rmp(uint32_t rmpn)
+{
+	uint32_t in[DEVX_ST_SZ_DW(query_rmp_in)] = {0};
+	uint32_t out[DEVX_ST_SZ_DW(query_rmp_out)];
+
+
+	DEVX_SET(query_rmp_in, in, opcode, MLX5_CMD_OP_QUERY_RMP);
+	DEVX_SET(query_rmp_in, in, rmpn, rmpn);
+
+	int ret = mlx5dv_devx_general_cmd(vfcontext, in, sizeof(in), out, sizeof(out));
+	if (ret) {
+		LOG_CMD_FAIL("query rmp", query_rmp_out, out);
+		return ret;
+	}
+
+	log_err("rmp status is ok: %d", DEVX_GET(query_rmp_out, out, rmp_context.state) == 1);
+	print_wq_status(DEVX_ADDR_OF(query_rmp_out, out, rmp_context.wq));
+	return 0;
+}
+
+
 static int directpath_query_nic_vport(void)
 {
 	uint32_t in[DEVX_ST_SZ_DW(query_nic_vport_context_in)] = {0};
@@ -224,17 +292,15 @@ static size_t ctx_rx_buffer_region(struct directpath_ctx *dp)
 	if (dp->use_rmp)
 		reg_size = DIRECTPATH_STRIDE_RX_BUF_POOL_SZ;
 	else
-		reg_size = DIRECTPATH_STRIDE_RX_BUF_POOL_SZ * dp->nr_qs * 32;
+		reg_size = (1 << DEFAULT_RQ_LOG_SZ) * (1 + dp->nr_qs) * DIRECTPATH_MAX_MTU;
 
 	return align_up(reg_size, PGSIZE_2MB);
 }
 
 static size_t ctx_tx_buffer_region(struct directpath_ctx *dp)
 {
-	return ctx_rx_buffer_region(dp);
-	size_t buflen = MBUF_DEFAULT_LEN;
-	buflen *= (1UL << DEFAULT_SQ_LOG_SZ) * 8 * dp->nr_qs;
-	return align_up(buflen, PGSIZE_2MB);
+	/* 4 MB */
+	return 2 * DIRECTPATH_STRIDE_RX_BUF_POOL_SZ;
 }
 
 static size_t estimate_region_size(struct directpath_ctx *dp)
@@ -242,49 +308,48 @@ static size_t estimate_region_size(struct directpath_ctx *dp)
 	uint32_t i;
 	size_t total = 0;
 	size_t wasted = 0;
-	size_t lg_cq_sz = DEFAULT_CQ_LOG_SZ;
+	size_t lg_rq_sz = DEFAULT_RQ_LOG_SZ;
 
 	/* doorbells */
 	total += CACHE_LINE_SIZE * ctx_max_doorbells(dp);
 
-	if (dp->use_rmp) {
-		wasted += align_up(total, PGSIZE_4KB) - total;
-		total = align_up(total, PGSIZE_4KB);
-		total += DIRECTPATH_STRIDE_RQ_NUM_DESC * sizeof(struct mlx5_mprq_wqe);
+#define ALLOC(size, alignment) do {                     \
+		wasted += align_up(total, (alignment)) - total; \
+		total = align_up(total, (alignment));           \
+		total += (size);                                \
+	} while (0);
 
-		lg_cq_sz = __builtin_ctzl(DIRECTPATH_TOTAL_RX_EL);
+	if (dp->use_rmp) {
+		ALLOC(DIRECTPATH_STRIDE_RQ_NUM_DESC * sizeof(struct mlx5_mprq_wqe), PGSIZE_4KB);
+		lg_rq_sz = __builtin_ctzl(DIRECTPATH_TOTAL_RX_EL);
 	}
 
 	for (i = 0; i < dp->nr_qs; i++) {
-		wasted += align_up(total, PGSIZE_4KB) - total;
-		total = align_up(total, PGSIZE_4KB);
-		total += (1UL << lg_cq_sz) * sizeof(struct mlx5_cqe64);
+		/* cq for rq */
+		ALLOC((1UL << lg_rq_sz) * sizeof(struct mlx5_cqe64), PGSIZE_4KB);
 
-		wasted += align_up(total, PGSIZE_4KB) - total;
-		total = align_up(total, PGSIZE_4KB);
-		total += (1UL << DEFAULT_CQ_LOG_SZ) * sizeof(struct mlx5_cqe64);
+		/* cq for sq */
+		ALLOC((1UL << DEFAULT_SQ_LOG_SZ) * sizeof(struct mlx5_cqe64), PGSIZE_4KB);
 
-		if (!dp->use_rmp) {
-			wasted += align_up(total, PGSIZE_4KB) - total;
-			total = align_up(total, PGSIZE_4KB);
-			total += (1UL << DEFAULT_RQ_LOG_SZ) * MLX5_SEND_WQE_BB;
-		}
+		/* wq for rq */
+		if (!dp->use_rmp)
+			ALLOC((1UL << DEFAULT_RQ_LOG_SZ) * MLX5_SEND_WQE_BB, PGSIZE_4KB);
 
-		wasted += align_up(total, PGSIZE_4KB) - total;
-		total = align_up(total, PGSIZE_4KB);
-		total += (1UL << DEFAULT_SQ_LOG_SZ) * MLX5_SEND_WQE_BB;
+		/* wq for sq */
+		ALLOC((1UL << DEFAULT_SQ_LOG_SZ) * MLX5_SEND_WQE_BB, PGSIZE_4KB);
 	}
 
-	wasted += align_up(total, PGSIZE_2MB) - total;
-	total = align_up(total, PGSIZE_2MB);
-	total += ctx_rx_buffer_region(dp);
+	/* rx buffer region */
+	ALLOC(ctx_rx_buffer_region(dp), PGSIZE_2MB);
 	log_debug("allocating %lu bytes for rx buf pool", ctx_rx_buffer_region(dp));
 
-	wasted += align_up(total, PGSIZE_2MB) - total;
-	total = align_up(total, PGSIZE_2MB);
-	total += ctx_tx_buffer_region(dp);
+	/* tx buffer region */
+	ALLOC(ctx_tx_buffer_region(dp), PGSIZE_2MB);
 	log_debug("allocating %lu bytes for tx buf pool", ctx_tx_buffer_region(dp));
+
 	log_debug("reg size %lu, wasted %lu", total, wasted);
+
+#undef ALLOC
 
 	return total;
 }
@@ -420,8 +485,12 @@ static int fill_wqc(struct directpath_ctx *dp, struct qp *qp, struct wq *wq,
 	uint64_t bufs, dbr;
 	size_t bbsz = MLX5_SEND_WQE_BB;
 
-	if (is_rq && dp->use_rmp)
+	if (!is_rq)
+		bbsz = MLX5_SEND_WQE_BB;
+	else if (dp->use_rmp)
 		bbsz = sizeof(struct mlx5_mprq_wqe);
+	else
+		bbsz = sizeof(struct mlx5_wqe_data_seg);
 
 	ret = alloc_from_uregion(dp, bbsz * wqe_cnt, PGSIZE_4KB, &bufs);
 	if (ret)
@@ -609,7 +678,8 @@ static int create_cq(struct directpath_ctx *dp, struct cq *cq, uint32_t log_nr_c
 	if (monitored) {
 		cq->qp_idx = qp_idx;
 		BUG_ON(cq->cqn >= MAX_CQ);
-		cqn_to_cq_map[cq->cqn] = cq;
+		cqn_to_cq_map[cq->cqn].ctx = dp;
+		cqn_to_cq_map[cq->cqn].qp_idx = qp_idx;
 		if (cfg.no_directpath_active_rss || qp_idx == 0) {
 			dp->active_rx_count++;
 			bitmap_set(dp->active_rx_queues, qp_idx);
@@ -684,7 +754,7 @@ static int create_rqt(struct directpath_ctx *dp)
 	size_t inlen;
 	uint32_t *in, i;
 	uint32_t out[DEVX_ST_SZ_DW(create_rqt_out)] = {0};
-	uint32_t nr_entries = u32_round_pow2(dp->nr_qs);
+	uint32_t nr_entries = u16_round_pow2(dp->nr_qs);
 	void *rqtc;
 
 	inlen = DEVX_ST_SZ_BYTES(create_rqt_in) + DEVX_ST_SZ_BYTES(rq_num) * nr_entries;
@@ -706,7 +776,7 @@ static int create_rqt(struct directpath_ctx *dp)
 	dp->rqt_obj = mlx5dv_devx_obj_create(vfcontext, in, inlen, out, sizeof(out));
 	free(in);
 	if (!dp->rqt_obj) {
-		log_err("create rqt obj failed");
+		LOG_CMD_FAIL("create rqt", create_rqt_out, out);
 		return -1;
 	}
 
@@ -971,7 +1041,7 @@ int alloc_raw_ctx(unsigned int nrqs, bool use_rmp, struct directpath_ctx **dp_ou
 	int ret = 0;
 	uint32_t i;
 	uint32_t tisn, tdn;
-	size_t lg_cq_sz;
+	size_t lg_rq_sz;
 	struct directpath_ctx *dp;
 	struct mlx5dv_pd pd_out;
 	struct mlx5dv_obj init_obj;
@@ -1039,9 +1109,9 @@ int alloc_raw_ctx(unsigned int nrqs, bool use_rmp, struct directpath_ctx **dp_ou
 			goto err;
 		}
 
-		lg_cq_sz = __builtin_ctzl(DIRECTPATH_TOTAL_RX_EL);
+		lg_rq_sz = __builtin_ctzl(DIRECTPATH_TOTAL_RX_EL);
 	} else {
-		lg_cq_sz = DEFAULT_CQ_LOG_SZ;
+		lg_rq_sz = DEFAULT_RQ_LOG_SZ;
 	}
 
 	for (i = 0; i < dp->nr_qs; i++) {
@@ -1053,15 +1123,15 @@ int alloc_raw_ctx(unsigned int nrqs, bool use_rmp, struct directpath_ctx **dp_ou
 			dp->qps[i].uarn = admin_uar->page_id;
 		dp->qps[i].uar_offset = i % 2 == 0 ? 0x800 : 0xA00;
 
-		ret = create_cq(dp, &dp->qps[i].rx_cq, lg_cq_sz, true, i);
+		ret = create_cq(dp, &dp->qps[i].rx_cq, lg_rq_sz, true, i);
 		if (ret)
 			goto err;
 
-		ret = create_cq(dp, &dp->qps[i].tx_cq, DEFAULT_CQ_LOG_SZ, false, i);
+		ret = create_cq(dp, &dp->qps[i].tx_cq, DEFAULT_SQ_LOG_SZ, false, i);
 		if (ret)
 			goto err;
 
-		ret = create_rq(dp, &dp->qps[i], DEFAULT_RQ_LOG_SZ, i);
+		ret = create_rq(dp, &dp->qps[i], lg_rq_sz, i);
 		if (ret)
 			goto err;
 
@@ -1097,8 +1167,8 @@ err:
 
 void release_directpath_ctx(struct proc *p)
 {
-	assert(p->directpath_data);
-	free_ctx((struct directpath_ctx *)p->directpath_data);
+	if (p->directpath_data)
+		free_ctx((struct directpath_ctx *)p->directpath_data);
 }
 
 void directpath_preallocate(bool use_rmp, unsigned int nrqs, unsigned int cnt)
@@ -1226,8 +1296,8 @@ int directpath_init(void)
 		return ret;
 
 	if (nr_vfio_prealloc) {
-		directpath_preallocate(true, 1, nr_vfio_prealloc);
-		log_info("control: preallocated %u 1-thread directpath contexts", nr_vfio_prealloc);
+		directpath_preallocate(vfio_prealloc_rmp, vfio_prealloc_nrqs, nr_vfio_prealloc);
+		log_info("control: preallocated %u %u-thread directpath contexts", nr_vfio_prealloc, vfio_prealloc_nrqs);
 	}
 
 	poll_thread_stop = true;

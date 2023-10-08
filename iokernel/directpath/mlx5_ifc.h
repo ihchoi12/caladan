@@ -60,6 +60,8 @@ enum {
 	MLX5_CMD_OP_DESTROY_EQ = 0x302,
 	MLX5_CMD_OP_CREATE_CQ = 0x400,
 	MLX5_CMD_OP_DESTROY_CQ = 0x401,
+	MLX5_CMD_OP_QUERY_CQ = 0x402,
+	MLX5_CMD_OP_MODIFY_CQ = 0x403,
 	MLX5_CMD_OP_CREATE_QP = 0x500,
 	MLX5_CMD_OP_DESTROY_QP = 0x501,
 	MLX5_CMD_OP_RST2INIT_QP = 0x502,
@@ -110,6 +112,7 @@ enum {
 	MLX5_CMD_OP_QUERY_LAG = 0x842,
 	MLX5_CMD_OP_CREATE_TIR = 0x900,
 	MLX5_CMD_OP_DESTROY_TIR = 0x902,
+	MLX5_CMD_OP_QUERY_TIR = 0x903,
 	MLX5_CMD_OP_CREATE_SQ = 0x904,
 	MLX5_CMD_OP_MODIFY_SQ = 0x905,
 	MLX5_CMD_OP_DESTROY_SQ = 0x906,
@@ -118,8 +121,10 @@ enum {
 	MLX5_CMD_OP_MODIFY_RQ = 0x909,
 
 	MLX5_CMD_OP_DESTROY_RQ = 0x90a,
+	MLX5_CMD_OP_QUERY_RQ = 0x90b,
 	MLX5_CMD_OP_CREATE_RMP = 0x90c,
 	MLX5_CMD_OP_DESTROY_RMP = 0x90e,
+	MLX5_CMD_OP_QUERY_RMP= 0x90f,
 	MLX5_CMD_OP_CREATE_TIS = 0x912,
 	MLX5_CMD_OP_MODIFY_TIS = 0x913,
 	MLX5_CMD_OP_DESTROY_TIS = 0x914,
@@ -3452,6 +3457,14 @@ struct mlx5_ifc_create_modify_header_arg_in_bits {
 	struct mlx5_ifc_modify_header_arg_bits      arg;
 };
 
+enum {
+	MLX5_MODIFY_FIELD_SELECT_MODIFY_FIELD_SELECT_CQ_PERIOD     = 0x1,
+	MLX5_MODIFY_FIELD_SELECT_MODIFY_FIELD_SELECT_CQ_MAX_COUNT  = 0x2,
+	MLX5_MODIFY_FIELD_SELECT_MODIFY_FIELD_SELECT_OI            = 0x4,
+	MLX5_MODIFY_FIELD_SELECT_MODIFY_FIELD_SELECT_C_EQN         = 0x8,
+	MLX5_MODIFY_FIELD_SELECT_MODIFY_FIELD_SELECT_STATUS         = 0x20,
+};
+
 struct mlx5_ifc_definer_bits {
 	u8         modify_field_select[0x40];
 
@@ -3682,7 +3695,7 @@ struct mlx5_ifc_qpc_bits {
 	u8         reserved_at_10[0x2];
 	u8         isolate_vl_tc[0x1];
 	u8         pm_state[0x2];
-	u8         reserved_at_15[0x1];
+	u8         rdma_wr_disabled[0x1];
 	u8	   req_e2e_credit_mode[0x2];
 	u8         offload_type[0x4];
 	u8         end_padding_mode[0x2];
@@ -3878,7 +3891,7 @@ struct mlx5_ifc_create_qp_in_bits {
 
 	struct mlx5_ifc_qpc_bits qpc;
 
-	u8         reserved_at_800[0x40];
+	u8         wq_umem_offset[0x40];
 
 	u8         wq_umem_id[0x20];
 
@@ -5703,6 +5716,42 @@ struct mlx5_ifc_create_cq_out_bits {
 	u8         reserved_at_60[0x20];
 };
 
+struct mlx5_ifc_modify_cq_out_bits {
+	u8         status[0x8];
+	u8         reserved_at_8[0x18];
+
+	u8         syndrome[0x20];
+
+	u8         reserved_at_40[0x40];
+};
+
+enum {
+	MLX5_MODIFY_CQ_IN_OP_MOD_MODIFY_CQ  = 0x0,
+	MLX5_MODIFY_CQ_IN_OP_MOD_RESIZE_CQ  = 0x1,
+};
+
+enum {
+	MLX5_RESIZE_FIELD_SELECT_RESIZE_FIELD_SELECT_LOG_CQ_SIZE    = 0x1,
+	MLX5_RESIZE_FIELD_SELECT_RESIZE_FIELD_SELECT_PAGE_OFFSET    = 0x2,
+	MLX5_RESIZE_FIELD_SELECT_RESIZE_FIELD_SELECT_LOG_PAGE_SIZE  = 0x4,
+};
+
+struct mlx5_ifc_resize_field_select_bits {
+	u8         resize_field_select[0x20];
+};
+
+
+struct mlx5_ifc_modify_field_select_bits {
+	u8         modify_field_select[0x20];
+};
+
+union mlx5_ifc_modify_field_select_resize_field_select_auto_bits {
+	struct mlx5_ifc_modify_field_select_bits modify_field_select;
+	struct mlx5_ifc_resize_field_select_bits resize_field_select;
+	u8         reserved_at_0[0x20];
+};
+
+
 
 struct mlx5_ifc_destroy_cq_in_bits {
 	u8         opcode[0x10];
@@ -5771,6 +5820,30 @@ struct mlx5_ifc_create_rmp_in_bits {
 	struct mlx5_ifc_rmpc_bits ctx;
 };
 
+struct mlx5_ifc_query_rmp_out_bits {
+	u8         status[0x8];
+	u8         reserved_at_8[0x18];
+
+	u8         syndrome[0x20];
+
+	u8         reserved_at_40[0xc0];
+
+	struct mlx5_ifc_rmpc_bits rmp_context;
+};
+
+struct mlx5_ifc_query_rmp_in_bits {
+	u8         opcode[0x10];
+	u8         reserved_at_10[0x10];
+
+	u8         reserved_at_20[0x10];
+	u8         op_mod[0x10];
+
+	u8         reserved_at_40[0x8];
+	u8         rmpn[0x18];
+
+	u8         reserved_at_60[0x20];
+};
+
 
 struct mlx5_ifc_destroy_rmp_in_bits {
 	u8         opcode[0x10];
@@ -5818,13 +5891,17 @@ struct mlx5_ifc_destroy_rq_in_bits {
 };
 
 struct mlx5_ifc_create_rqt_out_bits {
-	u8         reserved_at_0[0x40];
+	u8         status[0x8];
+	u8         reserved_at_8[0x18];
+
+	u8         syndrome[0x20];
 
 	u8         reserved_at_40[0x8];
 	u8         rqtn[0x18];
 
 	u8         reserved_at_60[0x20];
 };
+
 
 struct mlx5_ifc_destroy_rqt_in_bits {
 	u8         opcode[0x10];
@@ -6270,6 +6347,30 @@ struct mlx5_ifc_rqc_bits {
 	struct mlx5_ifc_wq_bits wq; /* Not used in LRO RQ. */
 };
 
+
+struct mlx5_ifc_query_rq_out_bits {
+	u8         status[0x8];
+	u8         reserved_at_8[0x18];
+
+	u8         syndrome[0x20];
+
+	u8         reserved_at_40[0xc0];
+
+	struct mlx5_ifc_rqc_bits rq_context;
+};
+
+struct mlx5_ifc_query_rq_in_bits {
+	u8         opcode[0x10];
+	u8         reserved_at_10[0x10];
+
+	u8         reserved_at_20[0x10];
+	u8         op_mod[0x10];
+
+	u8         reserved_at_40[0x8];
+	u8         rqn[0x18];
+
+	u8         reserved_at_60[0x20];
+};
 struct mlx5_ifc_create_rq_in_bits {
 	u8 opcode[0x10];
 	u8 uid[0x10];
@@ -6328,6 +6429,31 @@ struct mlx5_ifc_cqc_bits {
 	u8 dbr_addr[0x40];
 };
 
+struct mlx5_ifc_modify_cq_in_bits {
+	u8         opcode[0x10];
+	u8         uid[0x10];
+
+	u8         reserved_at_20[0x10];
+	u8         op_mod[0x10];
+
+	u8         reserved_at_40[0x8];
+	u8         cqn[0x18];
+
+	union mlx5_ifc_modify_field_select_resize_field_select_auto_bits modify_field_select_resize_field_select;
+
+	struct mlx5_ifc_cqc_bits cq_context;
+
+	u8         reserved_at_280[0x60];
+
+	u8         cq_umem_valid[0x1];
+	u8         reserved_at_2e1[0x1f];
+
+	u8         reserved_at_300[0x580];
+
+	u8         pas[][0x40];
+};
+
+
 struct mlx5_ifc_create_cq_in_bits {
 	u8 opcode[0x10];
 	u8 uid[0x10];
@@ -6370,7 +6496,6 @@ struct mlx5_ifc_query_cq_in_bits {
 
 	u8         reserved_at_60[0x20];
 };
-
 
 struct mlx5_ifc_rq_num_bits {
 	u8 reserved_at_0[0x8];

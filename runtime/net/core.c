@@ -28,9 +28,20 @@ static struct mempool net_tx_buf_mp;
 static struct tcache *net_tx_buf_tcache;
 static DEFINE_PERTHREAD(struct tcache_perthread, net_tx_buf_pt);
 
-int net_init_mempool_late(void)
+int net_init_mempool_threads(void)
 {
-	int i, ret;
+	int i;
+
+	for (i = 0; i < maxks; i++)
+		tcache_init_perthread(net_tx_buf_tcache,
+			&perthread_get_remote(net_tx_buf_pt, i));
+
+	return 0;
+}
+
+int net_init_mempool(void)
+{
+	int ret;
 
 	ret = mempool_create(&net_tx_buf_mp, iok.tx_buf, iok.tx_len, PGSIZE_2MB,
 			     align_up(net_get_mtu() + MBUF_HEAD_LEN + MBUF_DEFAULT_HEADROOM,
@@ -42,10 +53,6 @@ int net_init_mempool_late(void)
 		"runtime_tx_bufs", TCACHE_DEFAULT_MAG_SIZE);
 	if (unlikely(!net_tx_buf_tcache))
 		return -ENOMEM;
-
-	for (i = 0; i < maxks; i++)
-		tcache_init_perthread(net_tx_buf_tcache,
-			&perthread_get_remote(net_tx_buf_pt, i));
 
 	return 0;
 }
@@ -496,6 +503,7 @@ static int net_tx_local_loopback(struct mbuf *m_in, uint8_t proto)
 	m->csum_type = CHECKSUM_TYPE_UNNECESSARY;
 	m->release = (void (*)(struct mbuf *))sfree;
 
+	mbuf_mark_network_offset(m);
 	mbuf_pull_hdr(m, struct ip_hdr);
 	switch(proto) {
 		case IPPROTO_UDP:
@@ -664,6 +672,10 @@ int net_init_thread(void)
 		return -ENOMEM;
 
 	k->iokernel_softirq = th;
+
+	if (!cfg_directpath_external())
+		tcache_init_perthread(net_tx_buf_tcache, &perthread_get(net_tx_buf_pt));
+
 	return 0;
 }
 
@@ -701,14 +713,6 @@ static struct net_driver_ops iokernel_ops = {
 	.get_flow_affinity = compute_flow_affinity,
 };
 
-int net_init_late(void)
-{
-	/* iokernel may provide buffers later */
-	if (cfg_directpath_external())
-		return 0;
-
-	return net_init_mempool_late();
-}
 
 /**
  * net_init - initializes the network stack
@@ -723,5 +727,8 @@ int net_init(void)
 	if (!cfg_directpath_enabled())
 		net_ops = iokernel_ops;
 
-	return 0;
+	if (cfg_directpath_external())
+		return 0;
+
+	return net_init_mempool();
 }

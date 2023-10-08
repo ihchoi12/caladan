@@ -257,7 +257,6 @@ int storage_init_thread(void)
 	struct storage_q *q = &k->storage_q;
 	thread_t *th;
 
-	int ret;
 	uint32_t max_xfer_size, entries, depth, *consumer_idx;
 	shmptr_t cq_shm;
 	struct spdk_nvme_cpl *cpl;
@@ -296,12 +295,6 @@ int storage_init_thread(void)
 		return -ENOMEM;
 	}
 	opts.cq.vaddr = cpl;
-	ret = mem_lookup_page_phys_addr(cpl, PGSIZE_2MB, &opts.cq.paddr);
-	if (ret) {
-		log_err("storage_init_thread: could not lookup paddr %d", ret);
-		return ret;
-	}
-
 	qp_handle =
 		spdk_nvme_ctrlr_alloc_io_qpair(controller, &opts, sizeof(opts));
 	if (qp_handle == NULL) {
@@ -362,6 +355,12 @@ int storage_init(void)
 
 	if (spdk_env_init(&opts) < 0) {
 		log_err("Unable to initialize SPDK env");
+		return 1;
+	}
+
+	rc = spdk_mem_register(netcfg.tx_region.base, netcfg.tx_region.len);
+	if (rc != 0) {
+		log_err("storage: failed to register SHM area");
 		return 1;
 	}
 

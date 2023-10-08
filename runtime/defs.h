@@ -275,6 +275,11 @@ static inline bool hardware_q_pending(struct hardware_q *q)
 extern bool cfg_storage_enabled;
 extern unsigned long storage_device_latency_us;
 
+static inline bool storage_enabled(void)
+{
+	return cfg_storage_enabled;
+}
+
 struct storage_q {
 
 	spinlock_t lock;
@@ -287,28 +292,9 @@ struct storage_q {
 	unsigned long pad[1];
 };
 
-static inline bool storage_available_completions(struct storage_q *q)
-{
-	return cfg_storage_enabled && hardware_q_pending(&q->hq);
-}
-
-static inline bool storage_pending_completions(struct storage_q *q)
-{
-	return cfg_storage_enabled && q->outstanding_reqs > 0 &&
-	       storage_device_latency_us <= 10;
-}
-
 #else
 
-struct storage_q {};
-
-static inline bool storage_available_completions(struct storage_q *q)
-{
-	return false;
-}
-
-static inline bool storage_pending_completions(struct storage_q *q)
-{
+static inline bool storage_enabled(void) {
 	return false;
 }
 
@@ -415,8 +401,10 @@ struct kthread {
 	bool			pad2[5 + 8];
 	uint64_t		last_softirq_tsc;
 
+#ifdef DIRECT_STORAGE
 	/* 9th cache-line, storage nvme queues */
 	struct storage_q	storage_q;
+#endif
 
 	/* 10th cache-line, statistics counters */
 	uint64_t		stats[STAT_NR];
@@ -428,7 +416,9 @@ BUILD_ASSERT(offsetof(struct kthread, q_ptrs) % CACHE_LINE_SIZE == 0);
 BUILD_ASSERT(offsetof(struct kthread, txpktq) % CACHE_LINE_SIZE == 0);
 BUILD_ASSERT(offsetof(struct kthread, rq) % CACHE_LINE_SIZE == 0);
 BUILD_ASSERT(offsetof(struct kthread, timer_lock) % CACHE_LINE_SIZE == 0);
+#ifdef DIRECT_STORAGE
 BUILD_ASSERT(offsetof(struct kthread, storage_q) % CACHE_LINE_SIZE == 0);
+#endif
 BUILD_ASSERT(offsetof(struct kthread, stats) % CACHE_LINE_SIZE == 0);
 
 DECLARE_PERTHREAD(struct kthread *, mykthread);
@@ -480,6 +470,33 @@ static inline bool preempt_park_needed(struct kthread *k)
 	return k->q_ptrs->curr_grant_gen ==
 	       ACCESS_ONCE(k->q_ptrs->park_gen);
 }
+
+#ifdef DIRECT_STORAGE
+static inline bool storage_available_completions(struct kthread *k)
+{
+	return cfg_storage_enabled && hardware_q_pending(&k->storage_q.hq);
+}
+
+static inline bool storage_pending_completions(struct kthread *k)
+{
+	return cfg_storage_enabled && k->storage_q.outstanding_reqs > 0 &&
+	       storage_device_latency_us <= 10;
+}
+
+#else
+
+static inline bool storage_available_completions(struct kthread *k)
+{
+	return false;
+}
+
+static inline bool storage_pending_completions(struct kthread *k)
+{
+	return false;
+}
+
+#endif
+
 
 
 DECLARE_SPINLOCK(klock);
@@ -602,9 +619,6 @@ static inline bool cfg_directpath_external(void)
 	return cfg_directpath_mode == DIRECTPATH_MODE_EXTERNAL;
 }
 
-struct direct_txq {};
-struct direct_rxq {};
-
 static inline bool rx_poll(struct kthread *k)
 {
 	// Note: the caller must not hold the kthread-local lock
@@ -726,10 +740,10 @@ extern int stat_init_late(void);
 extern int tcp_init_late(void);
 extern int rcu_init_late(void);
 extern int directpath_init_late(void);
-extern int net_init_late(void);
 
 extern int ioqueues_init_early(void);
-extern int net_init_mempool_late(void);
+extern int net_init_mempool(void);
+extern int net_init_mempool_threads(void);
 
 struct directpath_spec;
 extern int mlx5_init_ext_late(struct directpath_spec *spec, int bar_fd, int mem_fd);

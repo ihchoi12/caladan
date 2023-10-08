@@ -6,10 +6,10 @@ extern crate byteorder;
 extern crate dns_parser;
 extern crate itertools;
 extern crate libc;
-extern crate lockstep;
-extern crate mersenne_twister;
 extern crate net2;
 extern crate rand;
+extern crate rand_distr;
+extern crate rand_mt;
 extern crate shenango;
 extern crate test;
 
@@ -33,10 +33,13 @@ use itertools::{Itertools, Either};
 use mersenne_twister::MersenneTwister;
 use rand::distributions::{Exp, IndependentSample};
 use rand::{Rng, SeedableRng};
+use rand_mt::Mt64;
 use shenango::udp::UdpSpawner;
 
 mod backend;
 use backend::*;
+
+mod lockstep;
 
 mod payload;
 use payload::{Payload, SyntheticProtocol, PAYLOAD_SIZE};
@@ -73,56 +76,9 @@ use resp::RespProtocol;
 use std::fs::{File, OpenOptions};
 static mut EXPTID: Option<String> = None;
 
-#[derive(Copy, Clone, Debug)]
-enum Distribution {
-    Zero,
-    Constant(u64),
-    Exponential(f64),
-    Bimodal1(f64),
-    Bimodal2(f64),
-    Bimodal3(f64),
-}
-impl Distribution {
-    fn name(&self) -> &'static str {
-        match *self {
-            Distribution::Zero => "zero",
-            Distribution::Constant(_) => "constant",
-            Distribution::Exponential(_) => "exponential",
-            Distribution::Bimodal1(_) => "bimodal1",
-            Distribution::Bimodal2(_) => "bimodal2",
-            Distribution::Bimodal3(_) => "bimodal3",
-        }
-    }
-    fn sample<R: Rng>(&self, rng: &mut R) -> u64 {
-        match *self {
-            Distribution::Zero => 0,
-            Distribution::Constant(m) => m,
-            Distribution::Exponential(m) => Exp::new(1.0 / m).ind_sample(rng) as u64,
-            Distribution::Bimodal1(m) => {
-                if rng.gen_weighted_bool(10) {
-                    (m * 5.5) as u64
-                } else {
-                    (m * 0.5) as u64
-                }
-            }
-            Distribution::Bimodal2(m) => {
-                if rng.gen_weighted_bool(1000) {
-                    (m * 500.5) as u64
-                } else {
-                    (m * 0.5) as u64
-                }
-            }
 
-            Distribution::Bimodal3(m) => {
-                if rng.gen_weighted_bool(100) {
-                    (m * 5.5) as u64
-                } else {
-                    (m * 0.5) as u64
-                }
-            }
-        }
-    }
-}
+mod distribution;
+use distribution::Distribution;
 
 arg_enum! {
 #[derive(Copy, Clone)]
@@ -781,7 +737,7 @@ fn process_result(sched: &RequestSchedule, packets: &mut [Packet]) -> Option<Sch
 
 fn gen_packets_for_schedule(schedules: &Arc<Vec<RequestSchedule>>) -> (Vec<Packet>, Vec<usize>) {
     let mut packets: Vec<Packet> = Vec::new();
-    let mut rng: MersenneTwister = SeedableRng::from_seed(rand::thread_rng().gen::<u64>());
+    let mut rng: Mt64 = Mt64::new(rand::thread_rng().gen::<u64>());
     let mut sched_boundaries = Vec::new();
     let mut last = 100_000_000;
     let mut end = 100_000_000;
@@ -1841,6 +1797,14 @@ fn main() {
                 .help("How to display loadgen results"),
         )
         .arg(
+            Arg::with_name("distspec")
+                .long("distspec")
+                .takes_value(true)
+                .help("Distribution of request lengths to use, new format")
+                .conflicts_with("distribution")
+                .conflicts_with("mean"),
+        )
+        .arg(
             Arg::with_name("distribution")
                 .long("distribution")
                 .short("d")
@@ -1864,17 +1828,24 @@ fn main() {
                 .help("Mean number of work iterations per request"),
         )
         .arg(
-            Arg::with_name("barrier-peers")
-                .long("barrier-peers")
-                .requires("barrier-leader")
+            Arg::with_name("leader-ip")
+                .long("leader-ip")
                 .takes_value(true)
-                .help("Number of peers in barrier group"),
+                .help("IP address of leader instance")
+                .conflicts_with("leader"),
         )
         .arg(
-            Arg::with_name("barrier-leader")
-                .long("barrier-leader")
-                .requires("barrier-peers")
+            Arg::with_name("barrier-peers")
+                .long("barrier-peers")
                 .takes_value(true)
+                .requires("leader")
+                .help("Number of connected loadgen instances"),
+        )
+        .arg(
+            Arg::with_name("leader")
+                .long("leader")
+                .requires("barrier-peers")
+                .takes_value(false)
                 .help("Leader of barrier group"),
         )
         .arg(
@@ -1959,12 +1930,32 @@ fn main() {
     let dowarmup = matches.is_present("warmup");
     let live_mode = matches.is_present("live");
 
+    let distspec = match matches.is_present("distspec") {
+        true => value_t_or_exit!(matches, "distspec", String),
+        false => {
+            let mean = value_t_or_exit!(matches, "mean", f64);
+            match matches.value_of("distribution").unwrap() {
+                "zero" => "zero".to_string(),
+                "constant" => format!("constant:{}", mean),
+                "exponential" => format!("exponential:{}", mean),
+                "bimodal1" => format!("bimodal:0.9:{}:{}", mean * 0.5, mean * 5.5),
+                "bimodal2" => format!("bimodal:0.999:{}:{}", mean * 0.5, mean * 500.5),
+                "bimodal3" => format!("bimodal:0.99:{}:{}", mean * 0.5, mean * 5.5),
+                _ => unreachable!(),
+            }
+        }
+    };
+    let distribution = Distribution::create(&distspec).unwrap();
     let tport = value_t_or_exit!(matches, "transport", Transport);
     let proto: Arc<Box<dyn LoadgenProtocol>> = match matches.value_of("protocol").unwrap() {
         "synthetic" => Arc::new(Box::new(SyntheticProtocol::with_args(&matches, tport))),
         "memcached" => Arc::new(Box::new(MemcachedProtocol::with_args(&matches, tport))),
         "dns" => Arc::new(Box::new(DnsProtocol::with_args(&matches, tport))),
-        "reflex" => Arc::new(Box::new(ReflexProtocol::with_args(&matches, tport))),
+        "reflex" => Arc::new(Box::new(ReflexProtocol::with_args(
+            &matches,
+            tport,
+            distribution,
+        ))),
         "http" => Arc::new(Box::new(HttpProtocol::with_args(&matches, tport))),
         "resp" => Arc::new(Box::new(RespProtocol::with_args(&matches, tport))),
         _ => unreachable!(),
@@ -1972,16 +1963,6 @@ fn main() {
 
     let intersample_sleep = value_t_or_exit!(matches, "intersample_sleep", u64);
     let output = value_t_or_exit!(matches, "output", OutputMode);
-    let mean = value_t_or_exit!(matches, "mean", f64);
-    let distribution = match matches.value_of("distribution").unwrap() {
-        "zero" => Distribution::Zero,
-        "constant" => Distribution::Constant(mean as u64),
-        "exponential" => Distribution::Exponential(mean),
-        "bimodal1" => Distribution::Bimodal1(mean),
-        "bimodal2" => Distribution::Bimodal2(mean),
-        "bimodal3" => Distribution::Bimodal3(mean),
-        _ => unreachable!(),
-    };
     let samples = value_t_or_exit!(matches, "samples", usize);
     let rampup = value_t_or_exit!(matches, "rampup", usize);
     let mode = matches.value_of("mode").unwrap();
@@ -2093,14 +2074,18 @@ fn main() {
             let matches = matches.clone();
             backend.init_and_run(config, move || {
 
-                let mut barrier_group = matches.value_of("barrier-leader").map(|leader| {
-                    lockstep::Group::from_hostname(
-                        leader,
-                        23232,
-                        value_t_or_exit!(matches, "barrier-peers", usize),
-                    )
-                    .unwrap()
-                });
+                let mut barrier_group = match (matches.is_present("leader"), matches.value_of("leader-ip")) {
+			(true, _) => {
+				let addr =  SocketAddrV4::new(FromStr::from_str("0.0.0.0").unwrap(), 23232);
+				let npeers = value_t_or_exit!(matches, "barrier-peers", usize);
+				Some(lockstep::Group::new_server(npeers - 1, addr, backend.clone()).unwrap())
+			},
+			(_, Some(ipstr)) => {
+				let addr = SocketAddrV4::new(FromStr::from_str(ipstr).unwrap(), 23232);
+				Some(lockstep::Group::new_client(addr, backend.clone()).unwrap())
+			}
+			(_, _) => None,
+		};
 
                 if !live_mode {
                     println!("Distribution, RPS, Target, Actual, Dropped, Never Sent, Median, 90th, 99th, 99.9th, 99.99th, Start, StartTsc");

@@ -12,7 +12,7 @@
 #define LOG_EQ_SIZE 10
 
 #define DEFAULT_CQ_LOG_SZ 8
-#define DEFAULT_RQ_LOG_SZ 7
+#define DEFAULT_RQ_LOG_SZ 10
 #define DEFAULT_SQ_LOG_SZ 7
 
 #define DIRECTPATH_PORT 1
@@ -28,7 +28,7 @@ extern int events_init(void);
 struct mlx5_eqe;
 struct directpath_ctx;
 extern void directpath_handle_cmd_eqe(struct mlx5_eqe *eqe);
-extern void directpath_handle_completion_eqe(struct mlx5_eqe *eqe);
+extern void directpath_handle_completion_eqe_batch(struct mlx5_eqe **eqe, unsigned int nr);
 extern void directpath_handle_cq_error_eqe(struct mlx5_eqe *eqe);
 extern bool directpath_commands_poll(void);
 extern bool directpath_events_poll(void);
@@ -42,7 +42,13 @@ extern int alloc_raw_ctx(unsigned int nrqs, bool use_rmp,
 	struct directpath_ctx **dp_out, bool is_admin);
 
 #define MAX_CQ 65536 // TODO FIX
-extern struct cq *cqn_to_cq_map[MAX_CQ];
+
+struct cq_map_entry {
+	struct directpath_ctx *ctx;
+	uint32_t qp_idx;
+};
+
+extern struct cq_map_entry cqn_to_cq_map[MAX_CQ];
 extern struct mlx5dv_devx_uar *admin_uar;
 
 extern struct mlx5dv_devx_obj *root_flow_tbl;
@@ -78,7 +84,6 @@ struct cq {
 	uint8_t arm_sn;
 	uint8_t qp_idx;
 	uint8_t state;
-	bool armed;
 	struct mlx5dv_devx_obj *obj;
 };
 
@@ -105,25 +110,30 @@ struct qp {
 
 struct directpath_ctx {
 	/* hot data */
-	struct proc *p;
+	struct proc		*p;
 
-	unsigned int kill:1;
-	unsigned int use_rmp:1;
+	uint16_t		nr_armed;
+	uint16_t		nr_qs;
+	uint16_t		active_rx_count;
+	uint16_t		disabled_rx_count;
 
-	uint32_t	nr_armed;
-	uint32_t	nr_qs;
+	uint64_t		sw_rss_gen;
+	uint64_t		hw_rss_gen;
 
+	DEFINE_BITMAP(armed_rx_queues, NCPU);
+
+	/* semi hot data */
 	/* command data */
 	int8_t command_slot;
 	struct list_node command_slot_wait_link;
 
-	uint64_t sw_rss_gen;
-	uint64_t hw_rss_gen;
-	uint32_t active_rx_count;
-	uint32_t disabled_rx_count;
+	uint32_t *rqns;
+
 	DEFINE_BITMAP(active_rx_queues, NCPU);
 
-	uint32_t *rqns;
+	unsigned int kill:1;
+	unsigned int use_rmp:1;
+
 
 	/* cold data */
 	struct ibv_pd *pd;
@@ -159,6 +169,8 @@ struct directpath_ctx {
 	struct qp qps[];
 };
 
+BUILD_ASSERT(offsetof(struct directpath_ctx, command_slot) == CACHE_LINE_SIZE);
+
 static inline bool directpath_command_queued(struct directpath_ctx *ctx)
 {
 	return ctx->command_slot >= COMMAND_SLOT_WAITING;
@@ -182,7 +194,11 @@ static inline struct mlx5_cqe64 *get_cqe(struct cq *cq, uint32_t idx)
 
 #define u32_round_pow2(val) 		\
 	({assert(sizeof(val) == 4);		\
-		 1U << u32_log(val - 1);})
+		 1U << u32_log(val);})
+
+#define u16_round_pow2(val) 		\
+	({assert(sizeof(val) == 2);		\
+		 1U << u32_log((uint32_t)val);})
 
 #define LOG_CMD_FAIL(msg, cmdtype, out)                      \
   do {                                                       \

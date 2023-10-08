@@ -54,8 +54,7 @@ static int mlx5_init_ext_thread_rx(struct shm_region *reg,
 	if (unlikely(ret))
 		return ret;
 
-	/* alias shadow tail, scheduler does not use it for vfio directpath */
-	v->shadow_tail = &v->cq.head;
+	v->shadow_tail = &k->q_ptrs->directpath_rx_tail;
 
 	if (cfg_directpath_strided)
 		return 0;
@@ -134,24 +133,31 @@ int mlx5_init_ext_late(struct directpath_spec *spec, int bar_fd, int mem_fd)
 	if (unlikely(ret))
 		return ret;
 
-	directpath_buf_tcache = mempool_create_tcache(&directpath_buf_mp,
-		"runtime_rx_bufs", cfg_directpath_strided ? 1 : TCACHE_DEFAULT_MAG_SIZE);
+	if (!cfg_directpath_strided) {
+		directpath_buf_tcache = mempool_create_tcache(&directpath_buf_mp,
+			"runtime_rx_bufs", TCACHE_DEFAULT_MAG_SIZE);
 
-	if (unlikely(!directpath_buf_tcache))
-		return -ENOMEM;
+		if (unlikely(!directpath_buf_tcache))
+			return -ENOMEM;
 
-	for (i = 0; i < maxks; i++)
-		tcache_init_perthread(directpath_buf_tcache,
-			&perthread_get_remote(directpath_buf_pt, i));
+		for (i = 0; i < maxks; i++)
+			tcache_init_perthread(directpath_buf_tcache,
+			                      &perthread_get_remote(directpath_buf_pt, i));
+	}
 
 	iok.tx_buf = iok.rx_buf + iok.rx_len;
 	iok.tx_len = spec->tx_buf_region_size;
-	ret = net_init_mempool_late();
+	ret = net_init_mempool();
 	if (unlikely(ret)) {
 		log_err("failed to setup late tx mempools");
 		return ret;
 	}
 
+	ret = net_init_mempool_threads();
+	if (unlikely(ret)) {
+		log_err("failed to setup late perthread tx buf caches");
+		return ret;
+	}
 	/*
 	 * The NIC memory registration is done using the VA of the shared memory
 	 * region as mapped in the iokernel. This computes the offset to add to

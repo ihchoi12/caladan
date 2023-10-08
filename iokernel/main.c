@@ -18,6 +18,8 @@
 struct iokernel_cfg cfg;
 struct dataplane dp;
 
+unsigned int vfio_prealloc_nrqs = 1;
+bool vfio_prealloc_rmp = true;
 uint32_t nr_vfio_prealloc;
 bool stat_logging;
 bool allowed_cores_supplied;
@@ -44,6 +46,7 @@ static const struct init_entry iok_init_handlers[] = {
 	IOK_INITIALIZER(simple),
 	IOK_INITIALIZER(numa),
 	IOK_INITIALIZER(ias),
+	IOK_INITIALIZER(proc_timer),
 
 	/* control plane */
 	IOK_INITIALIZER(control),
@@ -81,6 +84,31 @@ static int run_init_handlers(const char *phase, const struct init_entry *h,
 	}
 
 	return 0;
+}
+
+static void dataplane_loop_vfio(void)
+{
+	bool work_done;
+
+	log_info("main: core %u running dataplane. [Ctrl+C to quit]",
+			rte_lcore_id());
+	fflush(stdout);
+
+	/* run until quit or killed */
+	for (;;) {
+		work_done = false;
+
+		/* adjust core assignments */
+		sched_poll();
+
+		work_done |= directpath_poll();
+
+		/* handle control messages */
+		if (!work_done)
+			dp_clients_rx_control_lrpcs();
+
+		STAT_INC(LOOPS, 1);
+	}
 }
 
 /*
@@ -124,9 +152,6 @@ void dataplane_loop(void)
 
 		/* process a batch of commands from runtimes */
 		work_done |= commands_rx();
-
-		if (cfg.vfio_directpath)
-			work_done |= directpath_poll();
 
 		/* handle control messages */
 		if (!work_done)
@@ -191,7 +216,14 @@ int main(int argc, char *argv[])
 				fprintf(stderr, "missing vfioprealloc argument\n");
 				return -EINVAL;
 			}
-			nr_vfio_prealloc = atoi(argv[++i]);
+			char *token = strtok(argv[++i], ":");
+			nr_vfio_prealloc = atoi(token);
+			token = strtok(NULL, ":");
+			if (!token) continue;
+			vfio_prealloc_nrqs = atoi(token);
+			token = strtok(NULL, ":");
+			if (!token) continue;
+			vfio_prealloc_rmp = atoi(token);
 		} else if (!strcmp(argv[i], "vfio")) {
 #ifndef DIRECTPATH
 			log_err("please recompile with CONFIG_DIRECTPATH=y");
@@ -252,9 +284,13 @@ int main(int argc, char *argv[])
 
 	iok_info->cycles_per_us = cycles_per_us;
 	iok_info->external_directpath_enabled = cfg.vfio_directpath;
+	iok_info->external_directpath_rmp = vfio_prealloc_rmp;
 
 	pthread_barrier_wait(&init_barrier);
 
-	dataplane_loop();
+	if (cfg.vfio_directpath)
+		dataplane_loop_vfio();
+	else
+		dataplane_loop();
 	return 0;
 }

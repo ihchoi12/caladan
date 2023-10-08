@@ -205,7 +205,6 @@ static struct proc *control_create_proc(mem_key_t key, size_t len,
 	size_t nr_pages;
 	struct proc *p = NULL;
 	struct thread_spec *threads = NULL;
-	unsigned long *overflow_queue = NULL;
 	void *shbuf = NULL;
 	int i, ret;
 
@@ -283,8 +282,8 @@ static struct proc *control_create_proc(mem_key_t key, size_t len,
 
 		th->tid = s->tid;
 		th->p = p;
-		th->at_idx = UINT_MAX;
-		th->ts_idx = UINT_MAX;
+		th->at_idx = UINT16_MAX;
+		th->ts_idx = UINT16_MAX;
 
 		/* initialize pointer to queue pointers in shared memory */
 		th->q_ptrs = (struct q_ptrs *) shmptr_to_ptr(&reg, s->q_ptrs,
@@ -301,6 +300,7 @@ static struct proc *control_create_proc(mem_key_t key, size_t len,
 			goto fail;
 
 		p->has_directpath |= th->directpath_hwq.enabled;
+		p->has_storage |= th->storage_hwq.enabled;
 	}
 
 	/* initialize the table of physical page addresses */
@@ -311,9 +311,11 @@ static struct proc *control_create_proc(mem_key_t key, size_t len,
 
 	p->max_overflows = hdr.egress_buf_count;
 	p->nr_overflows = 0;
-	p->overflow_queue = overflow_queue = malloc(sizeof(unsigned long) * p->max_overflows);
-	if (overflow_queue == NULL)
-		goto fail;
+	if (!cfg.vfio_directpath) {
+		p->overflow_queue = malloc(sizeof(unsigned long) * p->max_overflows);
+		if (p->overflow_queue == NULL)
+			goto fail;
+	}
 
 	/* free temporary allocations */
 	free(threads);
@@ -321,7 +323,8 @@ static struct proc *control_create_proc(mem_key_t key, size_t len,
 	return p;
 
 fail:
-	free(overflow_queue);
+	if (p)
+		free(p->overflow_queue);
 	free(threads);
 	free(p);
 	if (reg.base)

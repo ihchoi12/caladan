@@ -118,7 +118,7 @@ static void tcp_handle_timeouts(tcpconn_t *c, uint64_t now)
 /* a periodic background thread that handles timeout events */
 static void tcp_worker(void *arg)
 {
-	tcpconn_t *c;
+	tcpconn_t *c, *c_next;
 	uint64_t now;
 
 	while (true) {
@@ -134,7 +134,8 @@ static void tcp_worker(void *arg)
 		}
 
 
-		list_for_each(&tcp_conns, c, global_link) {
+		list_for_each_safe(&tcp_conns, c, c_next, global_link) {
+			prefetch(c_next);
 			if (preempt_needed()) {
 				again = true;
 				break;
@@ -148,6 +149,39 @@ static void tcp_worker(void *arg)
 			timer_sleep(500 * ONE_US);
 	}
 }
+
+/**
+ * tcp_free_rx_bufs - try to free some buffers when we are running low
+ *
+ * This function scans all active TCP connections, dropping packets in the
+ * out-of-order queue and waking any waiters to handle in-order packets
+ */
+void tcp_free_rx_bufs(void)
+{
+	tcpconn_t *c;
+
+	LIST_HEAD(mbufs);
+	LIST_HEAD(waiters);
+
+	spin_lock_np(&tcp_lock);
+
+	list_for_each(&tcp_conns, c, global_link) {
+		if (list_empty_volatile(&c->rxq_ooo) && list_empty_volatile(&c->rxq))
+			continue;
+
+		spin_lock_np(&c->lock);
+		waitq_release_start(&c->rx_wq, &waiters);
+		list_append_list(&mbufs, &c->rxq_ooo);
+		c->rxq_ooo_len = 0;
+		spin_unlock_np(&c->lock);
+	}
+
+	spin_unlock_np(&tcp_lock);
+
+	mbuf_list_free(&mbufs);
+	waitq_release_finish(&waiters);
+}
+
 
 /**
  * tcp_conn_ack - removes acknowledged packets from TX queue
@@ -1234,7 +1268,12 @@ static int tcp_conn_shutdown_tx(tcpconn_t *c)
 	if (c->tx_closed)
 		return 0;
 
-	assert(c->pcb.state >= TCP_STATE_ESTABLISHED);
+	if (unlikely(c->pcb.state < TCP_STATE_ESTABLISHED)) {
+		tcp_conn_fail(c, ECONNABORTED);
+		tcp_tx_raw_rst(c->e.laddr, c->e.raddr, c->pcb.snd_nxt);
+		return 0;
+	}
+
 	while (c->tx_exclusive)
 		waitq_wait(&c->tx_wq, &c->lock);
 	ret = tcp_tx_ctl(c, TCP_FIN | TCP_ACK, NULL);

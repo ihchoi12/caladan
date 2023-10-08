@@ -36,13 +36,14 @@ struct iokernel_cfg {
 
 extern struct iokernel_cfg cfg;
 extern uint32_t nr_vfio_prealloc;
-
+extern unsigned int vfio_prealloc_nrqs;
+extern bool vfio_prealloc_rmp;
 
 /*
  * Constant limits
  */
 
-#define IOKERNEL_MAX_PROC		2048
+#define IOKERNEL_MAX_PROC		4096
 #define IOKERNEL_NUM_MBUFS		(8192 * 16)
 #define IOKERNEL_NUM_COMPLETIONS	32767
 #define IOKERNEL_OVERFLOW_BATCH_DRAIN	64
@@ -52,6 +53,9 @@ extern uint32_t nr_vfio_prealloc;
 #define IOKERNEL_CONTROL_BURST_SIZE	4
 #define IOKERNEL_POLL_INTERVAL		10
 
+/* Ensure that uint16_t can be used to index procs/cores */
+BUILD_ASSERT(NCPU < UINT16_MAX);
+BUILD_ASSERT(IOKERNEL_MAX_PROC < UINT16_MAX);
 
 /*
  * Process Support
@@ -81,33 +85,43 @@ struct thread_metrics {
 };
 
 struct thread {
+	/* 1st cache line - state used for polling threads */
 	bool			active;
+	uint16_t		core;
 	pid_t			tid;
 	uint64_t		next_poll_tsc;
-	struct proc		*p;
-	struct lrpc_chan_out	rxq;
-	struct lrpc_chan_in	txpktq;
-	struct lrpc_chan_in	txcmdq;
 	struct q_ptrs		*q_ptrs;
+
 	uint32_t		last_rq_head;
 	uint32_t		last_rq_tail;
 	uint32_t		last_rxq_head;
 	uint32_t		last_rxq_tail;
+
 	uint64_t		rxq_busy_since;
-	unsigned int		core;
-	unsigned int		at_idx;
-	unsigned int		ts_idx;
+
+	struct lrpc_chan_out	rxq;
+
+	/* useful metrics for scheduling policies */
+	struct thread_metrics	metrics;
+
+	/* 2nd cache line - state used when a thread is active */
+	struct proc 	*p;
+	struct list_node	idle_link;
 	uint32_t		last_yield_rcu_gen;
 	uint64_t		wake_gen;
 	uint64_t		change_tsc;
 
+	struct lrpc_chan_in	txpktq;
+	struct lrpc_chan_in	txcmdq;
+	uint16_t		at_idx;
+	uint16_t		ts_idx;
+
+	/* legacy directpath queues */
 	struct hwq		directpath_hwq;
 	struct hwq		storage_hwq;
-	struct list_node	idle_link;
-
-	/* useful metrics for scheduling policies */
-	struct thread_metrics	metrics;
 };
+
+BUILD_ASSERT(offsetof(struct thread, rxq.send_tail) <= CACHE_LINE_SIZE);
 
 static inline void thread_enable_sched_poll(struct thread *th)
 {
@@ -143,11 +157,10 @@ static inline bool hwq_busy(struct hwq *h, uint32_t cq_idx)
 }
 
 struct proc {
-	pid_t			pid;
-	struct shm_region	region;
-
-	struct ref		ref;
-
+	/* hot data */
+	struct ref			ref;
+	uint16_t			thread_count;
+	uint16_t			active_thread_count;
 	unsigned int		has_directpath:1;
 	unsigned int		has_vfio_directpath:1;
 	unsigned int		vfio_directpath_rmp:1;
@@ -155,28 +168,31 @@ struct proc {
 	unsigned int		attach_fail:1;
 	unsigned int		removed:1;
 	unsigned int		started:1;
-	struct runtime_info	*runtime_info;
+	unsigned int		has_storage:1;
 	unsigned long		policy_data;
 	unsigned long		directpath_data;
-	float			load;
 	uint64_t		next_poll_tsc;
 
-	/* scheduler data */
-	struct sched_spec	sched_cfg;
+	/* timer list expiry us */
+	uint64_t 		timer_pos_us;
 
-	/* the flow steering table */
-	unsigned int		flow_tbl[NCPU];
+	/* list node for timer wheel or poll list */
+	struct list_node	link;
+
+	float			load;
+	struct runtime_info	*runtime_info;
 
 	/* runtime threads */
-	unsigned int		thread_count;
-	unsigned int		active_thread_count;
-	struct thread		threads[NCPU];
-	struct thread		*active_threads[NCPU];
 	struct list_head	idle_threads;
-	unsigned int		next_thread_rr; // for spraying join requests/overflow completions
+	struct thread		threads[NCPU];
+	uint16_t		last_core[NCPU];
+
+	/* COLD */
 
 	/* network data */
 	uint32_t		ip_addr;
+
+	struct shm_region	region;
 
 	/* Overfloq queue for completion data */
 	size_t max_overflows;
@@ -184,25 +200,43 @@ struct proc {
 	unsigned long *overflow_queue;
 	struct list_node overflow_link;
 
+	uint16_t		next_thread_rr; // for spraying join requests/overflow completions
+
+	/* scheduler data */
+	struct sched_spec	sched_cfg;
+
+	/* the flow steering table */
+	uint16_t		flow_tbl[NCPU];
+	struct thread		*active_threads[NCPU];
 	int				control_fd;
+	pid_t			pid;
 
 	/* table of physical addresses for shared memory */
 	physaddr_t		page_paddrs[];
 };
 
-static inline void proc_enable_sched_poll(struct proc *p)
+extern void proc_timer_add(struct proc *p, uint64_t next_poll_tsc);
+extern void proc_timer_run(uint64_t now);
+extern uint64_t timer_pos;
+
+extern struct list_head poll_list;
+
+static inline bool proc_on_timer_wheel(struct proc *p)
 {
+	return p->timer_pos_us > timer_pos;
+}
+
+static inline bool proc_is_sched_polled(struct proc *p)
+{
+	return !proc_on_timer_wheel(p) && p->next_poll_tsc != UINT64_MAX;
+}
+
+static inline void proc_enable_sched_poll_nocheck(struct proc *p)
+{
+	assert(!proc_on_timer_wheel(p));
+
 	p->next_poll_tsc = 0;
-}
-
-static inline void proc_set_next_poll(struct proc *p, uint64_t tsc)
-{
-	p->next_poll_tsc = tsc;
-}
-
-static inline void proc_disable_sched_poll(struct proc *p)
-{
-	p->next_poll_tsc = UINT64_MAX;
+	list_add_tail(&poll_list, &p->link);
 }
 
 
@@ -247,7 +281,7 @@ extern struct thread *ts[NCPU];
  */
 static inline void poll_thread(struct thread *th)
 {
-	if (th->ts_idx != UINT_MAX)
+	if (th->ts_idx != UINT16_MAX)
 		return;
 	proc_get(th->p);
 	ts[nrts] = th;
@@ -260,11 +294,11 @@ static inline void poll_thread(struct thread *th)
  */
 static inline void unpoll_thread(struct thread *th)
 {
-	if (th->ts_idx == UINT_MAX)
+	if (th->ts_idx == UINT16_MAX)
 		return;
 	ts[th->ts_idx] = ts[--nrts];
 	ts[th->ts_idx]->ts_idx = th->ts_idx;
-	th->ts_idx = UINT_MAX;
+	th->ts_idx = UINT16_MAX;
 	proc_put(th->p);
 }
 
@@ -305,8 +339,8 @@ struct dataplane {
 	struct rte_mempool	*rx_mbuf_pool;
 	struct shm_region	ingress_mbuf_region;
 
+	uint16_t			nr_clients;
 	struct proc		*clients[IOKERNEL_MAX_PROC];
-	int			nr_clients;
 	struct rte_hash		*ip_to_proc;
 	struct rte_device	*device;
 };
@@ -393,6 +427,7 @@ extern int dp_clients_init(void);
 extern int dpdk_late_init(void);
 extern int hw_timestamp_init(void);
 extern int stats_init(void);
+extern int proc_timer_init(void);
 
 extern char *nic_pci_addr_str;
 extern struct pci_addr nic_pci_addr;
@@ -440,6 +475,11 @@ extern bool directpath_poll_proc(struct proc *p, uint64_t *delay_cycles, uint64_
 extern void directpath_notify_waking(struct proc *p, struct thread *th);
 extern void directpath_dataplane_notify_kill(struct proc *p);
 extern void directpath_dataplane_attach(struct proc *p);
+
+extern void directpath_poll_proc_prefetch(struct proc *p);
+extern void *directpath_poll_proc_prefetch_th0(struct proc *p, uint32_t qidx);
+extern void directpath_poll_proc_prefetch_th1(void *cq, uint32_t cons_idx);
+
 #else
 
 static inline int alloc_directpath_ctx(struct proc *p, ...)
@@ -451,6 +491,15 @@ static inline void release_directpath_ctx(struct proc *p) {}
 static inline void directpath_preallocate(bool use_rmp, unsigned int nrqs, unsigned int cnt) {}
 static inline void directpath_dataplane_notify_kill(struct proc *p) {}
 static inline void directpath_dataplane_attach(struct proc *p) {}
+
+static inline void directpath_poll_proc_prefetch(struct proc *p) {}
+static inline void *directpath_poll_proc_prefetch_th0(struct proc *p, uint32_t qidx)
+{
+	return NULL;
+}
+
+static inline void directpath_poll_proc_prefetch_th1(void *cq, uint32_t cons_idx) {}
+
 
 static inline bool directpath_poll(void)
 {

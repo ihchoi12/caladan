@@ -25,6 +25,11 @@ static size_t nr_hw_refs;
 static uint16_t *hw_refs;
 BUILD_ASSERT(DIRECTPATH_NUM_STRIDES <= UINT16_MAX);
 
+/* buffers that are currently in use in sw (and not hw) */
+static void **sw_pending_buffers;
+static uint64_t sw_pending_head;
+static uint64_t sw_pending_tail;
+
 /* slab allocator for mbuf structs */
 static struct slab mbuf_slab;
 static struct tcache *mbuf_tcache;
@@ -66,21 +71,44 @@ static inline void dec_sw_ref(void *buf, uint64_t count)
 {
 	size_t idx = index_of_buf(buf);
 	assert_preempt_disabled();
-	if (__sync_sub_and_fetch(&sw_refs[idx], count) == 0)
+
+	if (shared_rmp_enabled())
+		sw_refs[get_current_affinity() * nrbufs + idx] += count;
+	else if (__sync_sub_and_fetch(&sw_refs[idx], count) == 0)
 		tcache_free(perthread_ptr(directpath_buf_pt), headbuf_from_buf(buf));
+
 }
 
-static inline void ref_reset(void *buf, uint32_t post_idx)
+static inline void ref_reset_hw(uint32_t post_idx)
 {
-	size_t i, idx = index_of_buf(buf);
-
-	ACCESS_ONCE(sw_refs[idx]) = DIRECTPATH_NUM_STRIDES;
-
-	if (!hw_refs)
-		return;
+	size_t i;
 
 	for (i = 0; i < maxks; i++)
 		hw_refs[i * nr_hw_refs + post_idx] = 0;
+}
+
+static inline void ref_reset_sw(void *buf)
+{
+	size_t i, idx = index_of_buf(buf);
+
+	for (i = 0; i < maxks; i++)
+		sw_refs[i * nrbufs + idx] = 0;
+}
+
+static inline void ref_reset_normp(void *buf, uint32_t post_idx)
+{
+	size_t idx = index_of_buf(buf);
+	ACCESS_ONCE(sw_refs[idx]) = DIRECTPATH_NUM_STRIDES;
+}
+
+static inline uint64_t get_sw_ref(void *buf)
+{
+	size_t i, idx = index_of_buf(buf), count = 0;
+
+	for (i = 0; i < maxks; i++)
+		count += sw_refs[i * nrbufs + idx];
+
+	return count;
 }
 
 static inline uint64_t get_hw_ref(uint32_t idx)
@@ -96,8 +124,6 @@ static inline uint64_t get_hw_ref(uint32_t idx)
 static inline void mlx5_stride_post_buf(struct mlx5_wq *wq, void *buf, uint32_t idx)
 {
 	struct mlx5_mprq_wqe *wseg;
-
-	ref_reset(buf, idx);
 
 	wseg = wq->buf + (idx << wq->log_stride);
 	wseg->dseg.addr = htobe64((unsigned long)buf + rx_mr_offset);
@@ -130,16 +156,20 @@ int mlx5_init_rxq_wq_stride(struct mlx5_wq *wq, void *seg_buf, uint32_t *dbr,
 		if (unlikely(!buf))
 			return -ENOMEM;
 
+		if (!shared_rmp_enabled())
+			ref_reset_normp(buf, i);
+
 		mlx5_stride_post_buf(wq, buf, i);
 	}
 
-	if (shared_rmp_enabled())
-		ACCESS_ONCE(runtime_info->directpath_strides_posted) = size * DIRECTPATH_NUM_STRIDES;
+	if (shared_rmp_enabled()) {
+		rmp.rmp_head = size;
+		ACCESS_ONCE(runtime_info->directpath_strides_posted) = size;
+	}
 
 	udma_to_device_barrier();
 	wq->dbr[0] = htobe32(size & 0xffff);
 	wq->head = size;
-	rmp.rmp_head = size;
 	return 0;
 }
 
@@ -160,6 +190,7 @@ static void mlx5_refill_strided_rxq(struct mlx5_rxq *v, uint32_t nrdesc)
 		}
 
 		index = v->wq.head++ & (v->wq.cnt - 1);
+		ref_reset_normp(buf, index);
 		mlx5_stride_post_buf(&v->wq, buf, index);
 	}
 
@@ -170,9 +201,9 @@ static void mlx5_refill_strided_rxq(struct mlx5_rxq *v, uint32_t nrdesc)
 
 static void mlx5_refill_strided_rxq_rmp(void)
 {
-	uint32_t post_idx;
-	uint64_t start_head;
 	struct kthread *k;
+	uint32_t idx;
+	uint64_t start_head;
 	void *buf;
 
 	if (!spin_try_lock_np(&rmp.lock))
@@ -181,28 +212,77 @@ static void mlx5_refill_strided_rxq_rmp(void)
 	k = myk();
 	start_head = rmp.rmp_head;
 
-	while (likely(!preempt_cede_needed(k))) {
-		post_idx = rmp.rmp_head & (rmp.wq.cnt - 1);
-		if (unlikely(!load_acquire(&rmp.wq.buffers[post_idx])))
+	/* scan RX buffer slots to find ones that hardware is done with */
+	while (rmp.rmp_tail < rmp.rmp_head) {
+		idx = rmp.rmp_tail & (rmp.wq.cnt - 1);
+		buf = rmp.wq.buffers[idx];
+
+		if (get_hw_ref(idx) != DIRECTPATH_NUM_STRIDES)
 			break;
 
-		if (get_hw_ref(post_idx) != DIRECTPATH_NUM_STRIDES)
+		ref_reset_hw(idx);
+
+		/* record completed buffer */
+		sw_pending_buffers[sw_pending_head++ & (nrbufs - 1)] = buf;
+		rmp.rmp_tail++;
+	}
+
+	/* check if any buffers are now free */
+	uint64_t incr = 1;
+	for (size_t i = sw_pending_tail; i != sw_pending_head; i++) {
+		if (unlikely(preempt_cede_needed(k)))
 			break;
 
-		buf = tcache_alloc(perthread_ptr(directpath_buf_pt));
+		buf = sw_pending_buffers[i & (nrbufs - 1)];
+		if (!buf) {
+			sw_pending_tail += incr;
+			continue;
+		}
+
+		if (get_sw_ref(buf) != DIRECTPATH_NUM_STRIDES) {
+			/* stop incrementing the tail once we've hit a hole */
+			incr = 0;
+			continue;
+		}
+
+		ref_reset_sw(buf);
+		mempool_free(&directpath_buf_mp, buf);
+		sw_pending_buffers[i & (nrbufs - 1)] = NULL;
+		sw_pending_tail += incr;
+	}
+
+	/* keep cache footprint low */
+	if (sw_pending_head == sw_pending_tail)
+		sw_pending_head = sw_pending_tail = 0;
+
+	/* refill any free slots in the RX queue */
+	while (rmp.rmp_head - rmp.rmp_tail < rmp.wq.cnt) {
+		idx = rmp.rmp_head & (rmp.wq.cnt - 1);
+		buf = mempool_alloc(&directpath_buf_mp);
 		if (unlikely(!buf)) {
 			log_warn_ratelimited("out of rx buffers");
 			break;
 		}
 
-		mlx5_stride_post_buf(&rmp.wq, buf, post_idx);
+		mlx5_stride_post_buf(&rmp.wq, buf, idx);
 		rmp.rmp_head++;
 	}
 
+	/* notify NIC of newly posted buffers */
 	if (rmp.rmp_head != start_head) {
 		udma_to_device_barrier();
 		rmp.wq.dbr[0] = htobe32(rmp.rmp_head & 0xffff);
-		ACCESS_ONCE(runtime_info->directpath_strides_posted) = rmp.rmp_head * DIRECTPATH_NUM_STRIDES;
+		ACCESS_ONCE(runtime_info->directpath_strides_posted) = rmp.rmp_head;
+	}
+
+	/* if completely out of buffers, try reclaiming some from TCP stack */
+	if (unlikely(rmp.rmp_head == rmp.rmp_tail)) {
+		static uint64_t last_out_of_bufs;
+		if (rmp.rmp_head >= last_out_of_bufs) {
+			thread_spawn((thread_fn_t)tcp_free_rx_bufs, NULL);
+			/* only try this once per full cycle of RQ buffers */
+			last_out_of_bufs = rmp.rmp_head + rmp.wq.cnt;
+		}
 	}
 
 	spin_unlock_np(&rmp.lock);
@@ -226,6 +306,8 @@ static struct mbuf *mbuf_fill_cqe(void *dbuf, struct mlx5_cqe64 *cqe,
 		log_warn_ratelimited("dropping packet; oom");
 		return NULL;
 	}
+
+	prefetch(dbuf);
 
 	// NIC pads two 0 bytes for alignment of IP headers etc
 	mbuf_init(m, dbuf + 2, len, 0);
@@ -318,8 +400,17 @@ int mlx5_rx_stride_init_bufs(void)
 	nrbufs = iok.rx_len / DIRECTPATH_STRIDE_MODE_BUF_SZ;
 	nrbufs = align_up(nrbufs, CACHE_LINE_SIZE / sizeof(uint16_t));
 
+	if (!is_power_of_two(nrbufs)) {
+		log_err("bad directpath buf pool size, want power of two buffer count");
+		return -EINVAL;
+	}
+
 	sw_refs = calloc(nrbufs * maxks, sizeof(int16_t));
-	if (!sw_refs)
+	if (unlikely(!sw_refs))
+		return -ENOMEM;
+
+	sw_pending_buffers = calloc(nrbufs, sizeof(void *));
+	if (unlikely(!sw_pending_buffers))
 		return -ENOMEM;
 
 	if (shared_rmp_enabled()) {
