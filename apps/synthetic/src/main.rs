@@ -30,8 +30,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{App, Arg};
 use itertools::{Itertools, Either};
-use mersenne_twister::MersenneTwister;
-use rand::distributions::{Exp, IndependentSample};
+use rand::distributions::{Exp};
 use rand::{Rng, SeedableRng};
 use rand_mt::Mt64;
 use shenango::udp::UdpSpawner;
