@@ -482,6 +482,7 @@ fn process_result_final(
             latencies_raw.push(*lat);
         }
     });
+    eprintln!("Total # latencies: {}", latencies_raw.len());
 
     let percentile = |p| {
         let idx = ((packet_count + drop_count) as f32 * p / 100.0) as usize;
@@ -837,24 +838,13 @@ fn run_client_worker(
     let timer = backend.spawn_thread(move || {
         wg2.done();
         wg3.wait();
-        
         if live_mode2 {
             return;
         }
-        // return;
         backend.sleep(last + Duration::from_millis(500));
-        // unblock the writer thread if needed
-        let mut prev_nsent = nsent;
-        loop {
-            backend.sleep(Duration::from_secs(1));
-            if prev_nsent == nsent {
-                break;
-            }
-            eprintln!("prev_nsent: {}, nsent: {}", prev_nsent, nsent);
-            prev_nsent = nsent;
-        } 
-        
-        socket2.shutdown_write();
+        if Arc::strong_count(&socket2) > 1 {
+            socket2.shutdown();
+        }
     });
 
     wg.done();
@@ -876,6 +866,7 @@ fn run_client_worker(
             continue;
         }
 
+        // packet.actual_start = Some(packet.target_start);
         packet.actual_start = Some(start.elapsed());
         if let Err(e) = (&*socket).write_all(&payload[..]) {
             packet.actual_start = None;
@@ -894,7 +885,6 @@ fn run_client_worker(
         let mut prev_received = received_packets.load(Ordering::SeqCst);
 
         while received_packets.load(Ordering::SeqCst) < nsent {
-            // eprintln!("sent: {}, received: {}", nsent, received_packets.load(Ordering::SeqCst));
             backend.sleep(Duration::from_secs(1));
 
             let current_received = received_packets.load(Ordering::SeqCst);
@@ -2000,10 +1990,10 @@ fn main() {
     let zipf = matches.value_of("zipf")
         .map(|alpha| alpha.parse::<f64>().unwrap())
         .filter(|&alpha| if nthreads == 1 {
-            eprintln!("WARNING: ZIPF distribution was selected with only 1 thread.");
+            panic!("ZIPF distribution was selected with only 1 thread.");
             false
         } else if alpha == 0.0 {
-            eprintln!("WARNING: Alpha = 0 is a uniform distribution.");
+            panic!("Alpha = 0 is a uniform distribution.");
             false
         } else {
             true
