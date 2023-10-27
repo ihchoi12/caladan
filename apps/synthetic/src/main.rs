@@ -32,6 +32,7 @@ use clap::{App, Arg};
 use itertools::{Itertools, Either};
 use rand::distributions::{Exp};
 use rand::{Rng, SeedableRng};
+use rand::seq::SliceRandom;
 use rand_mt::Mt64;
 use shenango::udp::UdpSpawner;
 
@@ -1229,7 +1230,7 @@ fn zipf_gen_classic_packet_schedule(
 
         let ns_per_packet = 1_000_000_000.0 / rate;
 
-        // println!("{} pps : {} ns", rate as usize, ns_per_packet as usize);
+        eprintln!("rampup {} pps : {} ns", rate as usize, ns_per_packet as usize);
 
         sched.push(RequestSchedule {
             arrival: Distribution::Exponential(ns_per_packet),
@@ -1243,7 +1244,7 @@ fn zipf_gen_classic_packet_schedule(
 
     let ns_per_packet = 1_000_000_000.0 / pps;
 
-    // println!("{} pps : {} ns per packet", pps as usize, ns_per_packet as usize);
+    eprintln!("{} pps : {} ns per packet", pps as usize, ns_per_packet as usize);
 
     sched.push(RequestSchedule {
         arrival: Distribution::Exponential(ns_per_packet),
@@ -1283,6 +1284,7 @@ fn zipf_gen_loadshift_experiment(
                     .enumerate()
                     .for_each(|(i, pps)| {
                         let ns_per_packet = 1_000_000_000.0 / pps;
+                        eprintln!("{} pps : {} ns", pps as usize, ns_per_packet as usize);
                         acc[i].push(
                             RequestSchedule {
                                 arrival: Distribution::Exponential(ns_per_packet),
@@ -1294,6 +1296,7 @@ fn zipf_gen_loadshift_experiment(
                             }
                         );
                     });
+                acc.shuffle(&mut rand::thread_rng());
                 (acc, ppss)
             }
         )
@@ -1632,13 +1635,13 @@ fn zipf_run_client(
 
     let mut ret = true;
     for (results, total_pps) in results.into_iter().zip(total_ppss) {
-        ret = results.iter()
-            .map(|(sched, last, sched_start)| {
-                process_result_final(sched, vec![last.clone()], start_unix, *sched_start)
-            })
-            .collect_vec()
-            .into_iter()
-            .all(|p| p) && ret;
+        // ret = results.iter()
+        //     .map(|(sched, last, sched_start)| {
+        //         process_result_final(sched, vec![last.clone()], start_unix, *sched_start)
+        //     })
+        //     .collect_vec()
+        //     .into_iter()
+        //     .all(|p| p) && ret;
 
         let (scheds, results, sched_starts) = results.into_iter()
             .fold(
@@ -1654,7 +1657,7 @@ fn zipf_run_client(
         let sched_start = sched_starts.into_iter().min().unwrap();
 
         ret = zipf_process_result_final(total_pps, scheds, results, start_unix, sched_start) && ret;
-        println!("\n*******************************************\n");
+        eprintln!("\n*******************************************\n");
     }
 
     ret
@@ -2116,7 +2119,7 @@ fn main() {
                     if let Some(alpha) = zipf {    
                         let (schedules, ppss) = zipf_gen_loadshift_experiment(&loadshift_spec, distribution, nthreads, alpha, output);
                         let schedules = schedules.into_iter().map(|e| Arc::new(e)).collect();
-
+                        eprintln!("ppss: {:?}", ppss);
                         zipf_run_client(
                             ppss,
                             proto,
