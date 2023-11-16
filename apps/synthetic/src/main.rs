@@ -80,6 +80,12 @@ static mut EXPTID: Option<String> = None;
 mod distribution;
 use distribution::Distribution;
 
+// Define a global vector to accumulate latency_trace results
+static mut LATENCY_TRACE_RESULTS: Vec<(u64, u64)> = Vec::new();
+
+// Define a global counter to keep track of the total count of latency_trace values
+static mut LATENCY_TRACE_COUNT: u64 = 0;
+
 arg_enum! {
 #[derive(Copy, Clone)]
 pub enum Transport {
@@ -588,8 +594,6 @@ fn process_result_final(
 
 
     if let OutputMode::Trace = sched.output {
-        let mut cnt_map: HashMap<u64, u64> = HashMap::new();
-        let mut sum_lat_map: HashMap<u64, u64> = HashMap::new();
         
         for p in results.into_iter().filter_map(|p| p.trace).kmerge() {
             
@@ -604,59 +608,9 @@ fn process_result_final(
                 // )
                 let ms = ( (duration_to_ns(actual_start) / 1000000) / 10 ) * 10;
                 let lat = duration_to_ns(completion_time - actual_start) as u64 / 1000;
-
-                let count = cnt_map.entry(ms).or_insert(0);
-                *count += 1;
-
-                let sum_lat = sum_lat_map.entry(ms).or_insert(0);
-                *sum_lat += lat;
+                unsafe{ LATENCY_TRACE_RESULTS.push((ms, lat)) };
             } 
-            // else if p.actual_start.is_some() {
-            //     let actual_start = p.actual_start.unwrap();
-            //     print!(
-            //         "{}:{}:-1:-1 ",
-            //         duration_to_ns(actual_start),
-            //         duration_to_ns(actual_start) as i64 - duration_to_ns(p.target_start) as i64,
-            //     )
-            // } else {
-            //     print!("{}:-1:-1:-1 ", duration_to_ns(p.target_start))
-            // }
         }
-        let mut avg_lat_map: HashMap<u64, u64> = HashMap::new();
-        for (ms, count) in &cnt_map {
-            if let Some(&sum_lat) = sum_lat_map.get(ms) {
-                let avg_lat = sum_lat / *count;
-                avg_lat_map.insert(*ms, avg_lat);
-            }
-        }
-
-        // Convert avg_lat_map into a BTreeMap for sorting by keys
-        let sorted_avg_lat_map: BTreeMap<u64, u64> = avg_lat_map.into_iter().collect();
-        
-        if let Some(exptid) = unsafe {&EXPTID} {
-            if exptid != "null" {
-                let file_path = format!("{}.latency_trace", exptid);
-                // Open the file in append mode using OpenOptions
-                if let Ok(mut file) = OpenOptions::new()
-                    .append(true)
-                    .create(true)
-                    .open(&file_path) 
-                {
-                    for (ms, avg_lat) in sorted_avg_lat_map.iter() {
-                        writeln!(file, "{},{}", ms, avg_lat).expect("Failed to write to file");
-                    }
-                }
-            }
-            else {
-                // Iterate and print the elements in ascending order of keys
-                for (ms, avg_lat) in sorted_avg_lat_map.iter() {
-                    println!("{},{}", ms, avg_lat);
-                }
-            }
-        }
-        
-
-        // println!("");
     }
 
     true
@@ -1683,6 +1637,54 @@ fn zipf_run_client(
         .all(|p| p) */
 }
 
+fn write_latency_trace_results() {
+    let mut cnt_map: HashMap<u64, u64> = HashMap::new();
+    let mut sum_lat_map: HashMap<u64, u64> = HashMap::new();
+    
+    for (ms, lat) in unsafe{ &LATENCY_TRACE_RESULTS } {
+        let count = unsafe{ cnt_map.entry(*ms).or_insert(0) };
+        *count += 1;
+
+        let sum_lat = unsafe{ sum_lat_map.entry(*ms).or_insert(0) };
+        *sum_lat += lat;
+    }
+
+    let mut avg_lat_map: HashMap<u64, u64> = HashMap::new();
+    for (ms, count) in &cnt_map {
+        if let Some(&sum_lat) = sum_lat_map.get(ms) {
+            let avg_lat = sum_lat / *count;
+            avg_lat_map.insert(*ms, avg_lat);
+        }
+    }
+    // Convert avg_lat_map into a BTreeMap for sorting by keys
+    let sorted_avg_lat_map: BTreeMap<u64, u64> = avg_lat_map.into_iter().collect();
+    
+    if let Some(exptid) = unsafe {&EXPTID} {
+        if exptid != "null" {
+            let file_path = format!("{}.latency_trace", exptid);
+            // Open the file in append mode using OpenOptions
+            if let Ok(mut file) = OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(&file_path) 
+            {
+                for (ms, avg_lat) in sorted_avg_lat_map.iter() {
+                    writeln!(file, "{},{}", ms, avg_lat).expect("Failed to write to file");
+                }
+            }
+        }
+        else {
+            // Iterate and print the elements in ascending order of keys
+            for (ms, avg_lat) in sorted_avg_lat_map.iter() {
+                println!("{},{}", ms, avg_lat);
+            }
+        }
+    }
+    
+
+    println!("");
+}
+
 fn main() {
     let matches = App::new("Synthetic Workload Application")
         .version("0.1")
@@ -2067,17 +2069,17 @@ fn main() {
             backend.init_and_run(config, move || {
 
                 let mut barrier_group = match (matches.is_present("leader"), matches.value_of("leader-ip")) {
-			(true, _) => {
-				let addr =  SocketAddrV4::new(FromStr::from_str("0.0.0.0").unwrap(), 23232);
-				let npeers = value_t_or_exit!(matches, "barrier-peers", usize);
-				Some(lockstep::Group::new_server(npeers - 1, addr, backend.clone()).unwrap())
-			},
-			(_, Some(ipstr)) => {
-				let addr = SocketAddrV4::new(FromStr::from_str(ipstr).unwrap(), 23232);
-				Some(lockstep::Group::new_client(addr, backend.clone()).unwrap())
-			}
-			(_, _) => None,
-		};
+                    (true, _) => {
+                        let addr =  SocketAddrV4::new(FromStr::from_str("0.0.0.0").unwrap(), 23232);
+                        let npeers = value_t_or_exit!(matches, "barrier-peers", usize);
+                        Some(lockstep::Group::new_server(npeers - 1, addr, backend.clone()).unwrap())
+                    },
+                    (_, Some(ipstr)) => {
+                        let addr = SocketAddrV4::new(FromStr::from_str(ipstr).unwrap(), 23232);
+                        Some(lockstep::Group::new_client(addr, backend.clone()).unwrap())
+                    }
+                    (_, _) => None,
+                };
 
                 if !live_mode {
                     println!("Distribution, RPS, Target, Actual, Dropped, Never Sent, Median, 90th, 99th, 99.9th, 99.99th, Start, StartTsc");
@@ -2144,6 +2146,7 @@ fn main() {
                             0,
                         );
                     }
+                    write_latency_trace_results();
                     if let Some(ref mut g) = barrier_group {
                         g.barrier();
                     }
@@ -2201,6 +2204,8 @@ fn main() {
                         schedules,
                         1
                     );
+                    
+                    write_latency_trace_results();
 
                     if let Some(ref mut g) = barrier_group {
                         g.barrier();
@@ -2231,6 +2236,7 @@ fn main() {
                     ) { break; }
                     if j != samples { backend.sleep(Duration::from_secs(intersample_sleep)); }
                 }
+                write_latency_trace_results();
                 if let Some(ref mut g) = barrier_group {
                     g.barrier();
                 }
