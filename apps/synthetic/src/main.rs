@@ -470,6 +470,7 @@ fn process_result_final(
     }
 
     if packet_count <= 1 {
+        println!("WARNING: packet_count <= 1");
         println!(
             "[RESULT] {}, {}, 0, {}, {}, {}",
             sched.service.name(),
@@ -606,10 +607,31 @@ fn process_result_final(
                 //     duration_to_ns(completion_time - actual_start),
                 //     // p.server_tsc,
                 // )
-                let ms = ( (duration_to_ns(actual_start) / 1000000) / 10 ) * 10;
+                // let ms = ( (duration_to_ns(actual_start) / 1000000) / 10 ) * 10;
                 let lat = duration_to_ns(completion_time - actual_start) as u64 / 1000;
-                unsafe{ LATENCY_TRACE_RESULTS.push((ms, lat)) };
-            } 
+                unsafe{ LATENCY_TRACE_RESULTS.push((duration_to_ns(actual_start), lat)) };
+            }
+        }
+        if let Some(exptid) = unsafe {&EXPTID} {
+            if exptid != "null" {
+                let file_path = format!("{}.latency_trace", exptid);
+                // Open the file in append mode using OpenOptions
+                if let Ok(mut file) = OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(&file_path) 
+                {
+                    for (ns, lat) in unsafe{ LATENCY_TRACE_RESULTS.iter() } {
+                        writeln!(file, "{},{}", ns, lat).expect("Failed to write to file");
+                    }
+                }
+            }
+            else {
+                // Iterate and print the elements in ascending order of keys
+                for (ns, lat) in unsafe{ LATENCY_TRACE_RESULTS.iter() } {
+                    println!("{},{}", ns, lat);
+                }
+            }
         }
     }
 
@@ -617,6 +639,7 @@ fn process_result_final(
 }
 
 fn process_result(sched: &RequestSchedule, packets: &mut [Packet]) -> Option<ScheduleResult> {
+    // println!("packets.len(): {}", packets.len());
     if packets.len() == 0 {
         return None;
     }
@@ -631,9 +654,16 @@ fn process_result(sched: &RequestSchedule, packets: &mut [Packet]) -> Option<Sch
     let mut latencies_raw: Vec<u64> = Vec::new(); 
     for p in packets.iter() {
         match (p.actual_start, p.completion_time) {
-            (None, _) => never_sent += 1,
-            (_, None) => dropped += 1,
+            (None, _) => {
+                // println!("never sent!");
+                never_sent += 1
+            },
+            (_, None) => {
+                // println!("dropped!");
+                dropped += 1
+            },
             (Some(ref start), Some(ref end)) => {
+                // println!("success!");
                 let latency_ns = duration_to_ns(*end - *start);
                 
                 // Add the latency to the latencies_raw vector
@@ -644,7 +674,7 @@ fn process_result(sched: &RequestSchedule, packets: &mut [Packet]) -> Option<Sch
             }
         }
     }
-
+    // println!("packets.len(): {}, dropped: {}, never_sent: {}", packets.len(), dropped, never_sent);
     if packets.len() - dropped - never_sent <= 1 {
         return None;
     }
@@ -675,7 +705,7 @@ fn process_result(sched: &RequestSchedule, packets: &mut [Packet]) -> Option<Sch
         }
         _ => None,
     };
-
+    
     Some(ScheduleResult {
         packet_count: packets.len() - dropped - never_sent,
         drop_count: dropped,
@@ -807,7 +837,7 @@ fn run_client_worker(
     let start = Instant::now();
 
     
-
+    let pl = packets.len();
     for (i, packet) in packets.iter_mut().enumerate() {
         payload.clear();
         proto.gen_req(i, packet, &mut payload);
@@ -831,7 +861,12 @@ fn run_client_worker(
             }
             break;
         }
-        nsent += 1;    
+        nsent += 1; 
+        // println!("total: {}, nsent: {}", pl, nsent);
+        // Check if the counter has reached 100
+        // if nsent >= 1000 {
+        //     break;  // Break the loop after 100 iterations
+        // }
     }
 
     // wait for the timer thread to end
@@ -2146,7 +2181,7 @@ fn main() {
                             0,
                         );
                     }
-                    write_latency_trace_results();
+                    // write_latency_trace_results();
                     if let Some(ref mut g) = barrier_group {
                         g.barrier();
                     }
@@ -2205,7 +2240,7 @@ fn main() {
                         1
                     );
                     
-                    write_latency_trace_results();
+                    // write_latency_trace_results();
 
                     if let Some(ref mut g) = barrier_group {
                         g.barrier();
@@ -2236,7 +2271,7 @@ fn main() {
                     ) { break; }
                     if j != samples { backend.sleep(Duration::from_secs(intersample_sleep)); }
                 }
-                write_latency_trace_results();
+                // write_latency_trace_results();
                 if let Some(ref mut g) = barrier_group {
                     g.barrier();
                 }
