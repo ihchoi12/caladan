@@ -163,6 +163,12 @@ impl LoadgenProtocol for HttpProtocol {
     fn read_response(&self, mut sock: &Connection, buf: &mut Buffer) -> io::Result<(usize, u64)> {
         let mut pstate = ParseState::new();
 
+        // Uncomment for recv queue len eval
+        let mut queue_len = [0u8; 8];
+        sock.read_exact(&mut queue_len)?;
+        let queue_len = u64::from_be_bytes(queue_len);
+        // Uncomment for recv queue len eval
+
         if buf.data_size() == 0 {
             buf.try_shrink()?;
             let new_bytes = sock.read(buf.get_empty_buf())?;
@@ -208,7 +214,11 @@ impl LoadgenProtocol for HttpProtocol {
                 }
             }
 
-            return Ok((0, 0));
+            // Uncomment for recv queue len eval
+            return Ok((0, queue_len));
+            // Uncomment for recv queue len eval
+
+            // return Ok((0, 0))
         }
     }
 }

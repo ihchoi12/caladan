@@ -681,6 +681,10 @@ fn process_result(sched: &RequestSchedule, packets: &mut [Packet]) -> Option<Sch
             (_, None) => dropped += 1,
             (Some(ref start), Some(ref end)) => {
                 let latency_ns = duration_to_ns(*end - *start);
+
+                // Uncomment for recv queue len eval
+                println!("{}: {}", latency_ns, p.completion_server_tsc.unwrap());
+                // Uncomment for recv queue len eval
                 
                 // Add the latency to the latencies_raw vector
                 latencies_raw.push(latency_ns / 1000);
