@@ -1,6 +1,7 @@
 use clap::Arg;
 
 use std::cmp::min;
+use std::convert::TryInto;
 use std::io;
 use std::io::{Error, ErrorKind, Read};
 use std::net::SocketAddrV4;
@@ -164,9 +165,16 @@ impl LoadgenProtocol for HttpProtocol {
         let mut pstate = ParseState::new();
 
         // Uncomment for recv queue len eval
-        let mut queue_len = [0u8; 8];
-        sock.read_exact(&mut queue_len)?;
-        let queue_len = u64::from_be_bytes(queue_len);
+        while buf.data_size() < 8 {
+            buf.try_shrink()?;
+            let new_bytes = sock.read(buf.get_empty_buf())?;
+            if new_bytes == 0 {
+                return Err(Error::new(ErrorKind::UnexpectedEof, "eof"));
+            }
+            buf.push_data(new_bytes);
+        }
+        let queue_len = u64::from_be_bytes(buf.get_data()[0..8].try_into().unwrap());
+        buf.pull_data(8);
         // Uncomment for recv queue len eval
 
         if buf.data_size() == 0 {
@@ -218,7 +226,7 @@ impl LoadgenProtocol for HttpProtocol {
             return Ok((0, queue_len));
             // Uncomment for recv queue len eval
 
-            // return Ok((0, 0))
+            /* return Ok((0, 0)) */
         }
     }
 }
