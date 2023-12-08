@@ -80,11 +80,8 @@ static mut EXPTID: Option<String> = None;
 mod distribution;
 use distribution::Distribution;
 
-// Define a global vector to accumulate latency_trace results
-static mut LATENCY_TRACE_RESULTS: Vec<(u64, u64)> = Vec::new();
+static mut LATENCY_TRACE_RESULTS: Vec<(u64, u64)> = Vec::new(); // actualy_start, latency
 
-// Define a global counter to keep track of the total count of latency_trace values
-static mut LATENCY_TRACE_COUNT: u64 = 0;
 
 arg_enum! {
 #[derive(Copy, Clone)]
@@ -595,41 +592,40 @@ fn process_result_final(
 
 
     if let OutputMode::Trace = sched.output {
-        
-        for p in results.into_iter().filter_map(|p| p.trace).kmerge() {
-            
-            if let Some(completion_time) = p.completion_time {
-                let actual_start = p.actual_start.unwrap();
-                // println!(
-                //     "{},{}",
-                //     duration_to_ns(actual_start),
-                //     // duration_to_ns(actual_start) as i64 - duration_to_ns(p.target_start) as i64,
-                //     duration_to_ns(completion_time - actual_start),
-                //     // p.server_tsc,
-                // )
-                // let ms = ( (duration_to_ns(actual_start) / 1000000) / 10 ) * 10;
-                let lat = duration_to_ns(completion_time - actual_start) as u64 / 1000;
-                unsafe{ LATENCY_TRACE_RESULTS.push((duration_to_ns(actual_start), lat)) };
-            }
-        }
         if let Some(exptid) = unsafe {&EXPTID} {
             if exptid != "null" {
-                let file_path = format!("{}.latency_trace", exptid);
-                // Open the file in append mode using OpenOptions
-                if let Ok(mut file) = OpenOptions::new()
-                    .append(true)
-                    .create(true)
-                    .open(&file_path) 
-                {
-                    for (ns, lat) in unsafe{ LATENCY_TRACE_RESULTS.iter() } {
-                        writeln!(file, "{},{}", ns, lat).expect("Failed to write to file");
+                
+                let lat_file_path = format!("{}.latency_trace", exptid);
+                let mut lat_file = OpenOptions::new()
+                                                .append(true)
+                                                .create(true)
+                                                .open(&lat_file_path)
+                                                .expect("Failed to open file");
+                
+                // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
+                let recvq_file_path = format!("{}.recv_qlen", exptid);
+                let mut recvq_file = OpenOptions::new()
+                                                .append(true)
+                                                .create(true)
+                                                .open(&recvq_file_path)
+                                                .expect("Failed to open file");
+                // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
+
+
+                for p in results.into_iter().filter_map(|p| p.trace).kmerge() {
+                    
+                    if let Some(completion_time) = p.completion_time {
+                        let actual_start = duration_to_ns(p.actual_start.unwrap());
+                        let lat_in_us = duration_to_ns(completion_time - p.actual_start.unwrap()) as u64 / 1000;
+                        // unsafe{ LATENCY_TRACE_RESULTS.push((duration_to_ns(actual_start), lat)) };
+                        writeln!(lat_file, "{},{}", actual_start, lat_in_us).expect("Failed to write to lat_file");
+                        
+                        
+                        // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
+                        let recv_qlen = p.server_tsc;
+                        writeln!(recvq_file, "{},{},{}", actual_start, lat_in_us, recv_qlen).expect("Failed to write to recvq_file");
+                        // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
                     }
-                }
-            }
-            else {
-                // Iterate and print the elements in ascending order of keys
-                for (ns, lat) in unsafe{ LATENCY_TRACE_RESULTS.iter() } {
-                    println!("{},{}", ns, lat);
                 }
             }
         }
@@ -665,11 +661,6 @@ fn process_result(sched: &RequestSchedule, packets: &mut [Packet]) -> Option<Sch
             (Some(ref start), Some(ref end)) => {
                 // println!("success!");
                 let latency_ns = duration_to_ns(*end - *start);
-
-                // Uncomment for recv queue len eval
-                println!("{}: {}", latency_ns, p.completion_server_tsc.unwrap());
-                // Uncomment for recv queue len eval
-                
                 // Add the latency to the latencies_raw vector
                 latencies_raw.push(latency_ns / 1000);
                 
