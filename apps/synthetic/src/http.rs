@@ -164,18 +164,18 @@ impl LoadgenProtocol for HttpProtocol {
     fn read_response(&self, mut sock: &Connection, buf: &mut Buffer) -> io::Result<(usize, u64)> {
         let mut pstate = ParseState::new();
 
-        // Uncomment for recv queue len eval
-        while buf.data_size() < 8 {
-            buf.try_shrink()?;
-            let new_bytes = sock.read(buf.get_empty_buf())?;
-            if new_bytes == 0 {
-                return Err(Error::new(ErrorKind::UnexpectedEof, "eof"));
-            }
-            buf.push_data(new_bytes);
-        }
-        let queue_len = u64::from_be_bytes(buf.get_data()[0..8].try_into().unwrap());
-        buf.pull_data(8);
-        // Uncomment for recv queue len eval
+        // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
+        // while buf.data_size() < 8 {
+        //     buf.try_shrink()?;
+        //     let new_bytes = sock.read(buf.get_empty_buf())?;
+        //     if new_bytes == 0 {
+        //         return Err(Error::new(ErrorKind::UnexpectedEof, "eof"));
+        //     }
+        //     buf.push_data(new_bytes);
+        // }
+        // let queue_len = u64::from_be_bytes(buf.get_data()[0..8].try_into().unwrap());
+        // buf.pull_data(8);
+        // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
 
         if buf.data_size() == 0 {
             buf.try_shrink()?;
@@ -222,11 +222,11 @@ impl LoadgenProtocol for HttpProtocol {
                 }
             }
 
-            // Uncomment for recv queue len eval
-            return Ok((0, queue_len));
-            // Uncomment for recv queue len eval
+            // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
+            // return Ok((0, queue_len));
+            // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
 
-            /* return Ok((0, 0)) */
+            return Ok((0, 0))
         }
     }
 }

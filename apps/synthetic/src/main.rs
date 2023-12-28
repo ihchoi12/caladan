@@ -30,8 +30,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{App, Arg};
 use itertools::{Itertools, Either};
-use rand::distributions::{Exp};
-use rand::{Rng, SeedableRng};
+use rand_distr::{Normal};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use rand::seq::SliceRandom;
 use rand_mt::Mt64;
 use shenango::udp::UdpSpawner;
@@ -74,13 +74,15 @@ mod resp;
 use resp::RespProtocol;
 
 use std::fs::{File, OpenOptions};
+
 static mut EXPTID: Option<String> = None;
+static mut ONOFF: Option<String> = None;
 
 
 mod distribution;
 use distribution::Distribution;
 
-static mut LATENCY_TRACE_RESULTS: Vec<(u64, u64)> = Vec::new(); // actualy_start, latency
+static mut LATENCY_TRACE_RESULTS: Vec<(u64, u64)> = Vec::new(); // actual_start, latency
 
 
 arg_enum! {
@@ -470,7 +472,7 @@ fn process_result_final(
         println!("WARNING: packet_count <= 1");
         println!(
             "[RESULT] {}, {}, 0, {}, {}, {}",
-            sched.service.name(),
+            sched.arrival.name(),
             sched.rps,
             drop_count,
             never_sent_count,
@@ -521,7 +523,7 @@ fn process_result_final(
 
     println!(
         "[RESULT] {}, {}, {}, {}, {}, {}, {:.1}, {:.1}, {:.1}, {:.1}, {:.1}, {}, {}",
-        sched.service.name(),
+        sched.arrival.name(),
         sched.rps,
         (packet_count + drop_count) as u64 * 1000_000_000
             / duration_to_ns(last_send.unwrap() - first_send),
@@ -603,12 +605,12 @@ fn process_result_final(
                                                 .expect("Failed to open file");
                 
                 // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
-                let recvq_file_path = format!("{}.recv_qlen", exptid);
-                let mut recvq_file = OpenOptions::new()
-                                                .append(true)
-                                                .create(true)
-                                                .open(&recvq_file_path)
-                                                .expect("Failed to open file");
+                // let recvq_file_path = format!("{}.recv_qlen", exptid);
+                // let mut recvq_file = OpenOptions::new()
+                //                                 .append(true)
+                //                                 .create(true)
+                //                                 .open(&recvq_file_path)
+                //                                 .expect("Failed to open file");
                 // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
 
 
@@ -622,8 +624,8 @@ fn process_result_final(
                         
                         
                         // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
-                        let recv_qlen = p.server_tsc;
-                        writeln!(recvq_file, "{},{},{}", actual_start, lat_in_us, recv_qlen).expect("Failed to write to recvq_file");
+                        // let recv_qlen = p.server_tsc;
+                        // writeln!(recvq_file, "{},{},{}", actual_start, lat_in_us, recv_qlen).expect("Failed to write to recvq_file");
                         // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
                     }
                 }
@@ -715,29 +717,122 @@ fn process_result(sched: &RequestSchedule, packets: &mut [Packet]) -> Option<Sch
     })
 }
 
+fn lognormal_interarrival(rand_gaussian: f64) -> f64 {
+    lognormal(6.2726064589176, 1.8779582422664103, rand_gaussian)/10.0
+}
+
+fn lognormal_on(rand_gaussian: f64) -> f64 {
+    lognormal(2.868183746231741, 0.4301567266932548, rand_gaussian)
+}
+
+fn lognormal_off(rand_gaussian: f64) -> f64 {
+    lognormal(1.0872546045494296, 0.38168878514903204, rand_gaussian)
+}
+/* unit: microseconds */
+
+fn lognormal(mu: f64, sigma: f64, rand_gaussian: f64) -> f64 {
+    f64::exp(mu + sigma * rand_gaussian)
+}
+
 fn gen_packets_for_schedule(schedules: &Arc<Vec<RequestSchedule>>) -> (Vec<Packet>, Vec<usize>) {
+    use rand_distr::Distribution;
     let mut packets: Vec<Packet> = Vec::new();
     let mut rng: Mt64 = Mt64::new(rand::thread_rng().gen::<u64>());
     let mut sched_boundaries = Vec::new();
     let mut last = 100_000_000;
     let mut end = 100_000_000;
-    for sched in schedules.iter() {
-        end += duration_to_ns(sched.runtime);
-        loop {
-            packets.push(Packet {
-                randomness: rng.gen::<u64>(),
-                target_start: Duration::from_nanos(last),
-                work_iterations: sched.service.sample(&mut rng),
-                ..Default::default()
-            });
+    
+    if let Some(onoff) = unsafe{ &ONOFF } {
+        if onoff == "1" {
+            eprintln!("Running with On/Off pattern");
+            let seed = rng.gen();
+            let mut rand_gaussian = 0.0; // Replace with your random Gaussian value
+            let mut important_rand = StdRng::seed_from_u64(seed);
 
-            let nxt = last + sched.arrival.sample(&mut rng);
-            if nxt >= end {
-                break;
+            // Define the mean (mu) and standard deviation (sigma) of the Gaussian distribution
+            let mu = 0.0;
+            let sigma = 1.0;
+            let normal = Normal::new(mu, sigma).unwrap();    
+            
+            for sched in schedules.iter() {
+                end += duration_to_ns(sched.runtime);
+
+                let mut onoff_intervals: Vec<(bool, (u64, u64))> = Vec::new();
+                let mut is_on = false;
+                let mut onoff_timestamp = last;
+                let mut total_on_time: u64 = 0;
+                loop{
+                    rand_gaussian = normal.sample(&mut important_rand);
+                    let interval_in_ns = match is_on {
+                        true => std::cmp::min( (lognormal_on(rand_gaussian) * 1000.0) as u64, end - onoff_timestamp ),
+                        false => std::cmp::min( (lognormal_off(rand_gaussian) * 1000.0) as u64, end - onoff_timestamp ),
+                    };
+                    
+                    onoff_intervals.push((is_on, (onoff_timestamp, onoff_timestamp + interval_in_ns)));
+                    onoff_timestamp = onoff_timestamp + interval_in_ns;
+
+                    if is_on {
+                        total_on_time = total_on_time + interval_in_ns;
+                    }
+                    if onoff_timestamp == end {
+                        break;
+                    }
+                    is_on = !is_on;
+                }
+                let mut ontime_weight = total_on_time as f64 / duration_to_ns(sched.runtime) as f64;
+                println!("total_on_time: {}", total_on_time);
+                
+                // onoff_intervals = vec![
+                //     (true, (100_000_000, 2_100_000_000)),
+                //     (false, (2_100_000_000, 7_100_000_000)),
+                //     (true, (7_100_000_000, 10_100_000_000)),
+                //     // Add more pairs as needed
+                // ];
+                // ontime_weight = 1.0/2.0;
+                for (is_on, (_, interval_end)) in &onoff_intervals {
+                    loop {
+                        if last >= *interval_end {
+                            break;
+                        }
+                        if *is_on {
+                            packets.push(Packet {
+                                randomness: rng.gen::<u64>(),
+                                target_start: Duration::from_nanos(last),
+                                work_iterations: sched.service.sample(&mut rng),
+                                ..Default::default()
+                            });
+                        }
+
+                        let nxt = last + sched.arrival.onoff_sample(&mut rng, ontime_weight);
+                        last = nxt;
+                    }
+                    
+                }
+                sched_boundaries.push(packets.len());
             }
-            last = nxt;
         }
-        sched_boundaries.push(packets.len());
+        else{
+            eprintln!("Running w/o On/Off pattern");
+            for sched in schedules.iter() {
+                end += duration_to_ns(sched.runtime);
+                
+                loop {
+                    packets.push(Packet {
+                        randomness: rng.gen::<u64>(),
+                        target_start: Duration::from_nanos(last),
+                        work_iterations: sched.service.sample(&mut rng),
+                        ..Default::default()
+                    });
+        
+                    let nxt = last + sched.arrival.sample(&mut rng);
+                    if nxt >= end {
+                        break;
+                    }
+                    last = nxt;
+                }
+                sched_boundaries.push(packets.len());
+            }
+        }
     }
     (packets, sched_boundaries)
 }
@@ -1214,7 +1309,7 @@ fn zipf_gen_classic_packet_schedule(
 
         let ns_per_packet = 1_000_000_000.0 / rate;
 
-        eprintln!("rampup {} pps : {} ns", rate as usize, ns_per_packet as usize);
+        // eprintln!("rampup {} pps : {} ns", rate as usize, ns_per_packet as usize);
 
         sched.push(RequestSchedule {
             arrival: Distribution::Exponential(ns_per_packet),
@@ -1228,7 +1323,7 @@ fn zipf_gen_classic_packet_schedule(
 
     let ns_per_packet = 1_000_000_000.0 / pps;
 
-    eprintln!("{} pps : {} ns per packet", pps as usize, ns_per_packet as usize);
+    // eprintln!("{} pps : {} ns per packet", pps as usize, ns_per_packet as usize);
 
     sched.push(RequestSchedule {
         arrival: Distribution::Exponential(ns_per_packet),
@@ -1268,7 +1363,7 @@ fn zipf_gen_loadshift_experiment(
                     .enumerate()
                     .for_each(|(i, pps)| {
                         let ns_per_packet = 1_000_000_000.0 / pps;
-                        eprintln!("{} pps : {} ns", pps as usize, ns_per_packet as usize);
+                        // eprintln!("{} pps : {} ns", pps as usize, ns_per_packet as usize);
                         acc[i].push(
                             RequestSchedule {
                                 arrival: Distribution::Exponential(ns_per_packet),
@@ -1317,7 +1412,7 @@ fn zipf_process_result_final(
     if packet_count <= 1 {
         println!(
             "\n\n[RESULT] {}, {}, 0, {}, {}, {}",
-            scheds[0].service.name(),
+            scheds[0].arrival.name(),
             total_pps,
             drop_count,
             never_sent_count,
@@ -1376,7 +1471,7 @@ fn zipf_process_result_final(
 
     println!(
         "\n\n[RESULT] {}, {}, {}, {}, {}, {}, {:.1}, {:.1}, {:.1}, {:.1}, {:.1}, {}, {}",
-        scheds[0].service.name(),
+        scheds[0].arrival.name(),
         total_pps,
         target,
         actual,
@@ -1926,6 +2021,13 @@ fn main() {
                 .takes_value(true)
                 .help("enable ZIPF distribution for PPS over threads"),
         )
+        .arg(
+            Arg::with_name("onoff")
+                .long("onoff")
+                .takes_value(true)
+                .default_value("0")
+                .help("enable on/off pattern of requests"),
+        )
         .args(&SyntheticProtocol::args())
         .args(&MemcachedProtocol::args())
         .args(&DnsProtocol::args())
@@ -1935,8 +2037,11 @@ fn main() {
         .get_matches();
 
     let exptid = matches.value_of("exptid").unwrap_or("null").to_string();
+    let onoff = matches.value_of("onoff").unwrap_or("0").to_string();
+    
     unsafe {
         EXPTID = Some(exptid.clone());
+        ONOFF = Some(onoff.clone());
     }
     let addrs: Vec<SocketAddrV4> = matches
         .values_of("ADDR")

@@ -32,6 +32,14 @@ impl Distribution {
             }
         }
     }
+    pub fn onoff_sample<R: Rng>(&self, rng: &mut R, weight: f64) -> u64 {
+        match *self {
+            Distribution::Exponential(m) => Exp::new(1.0 / (m * weight)).unwrap().sample(rng) as u64,
+            _ => {
+                panic!("on/off pattern is supported for Exponential distribution only.");
+            }
+        }
+    }
 
     pub fn create(spec: &str) -> Result<Self, &str> {
         let tokens: Vec<&str> = spec.split(":").collect();
