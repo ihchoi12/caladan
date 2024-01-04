@@ -388,6 +388,7 @@ fn gen_classic_packet_schedule(
         // println!("{} pps : {} ns", rate, nthreads * 1000_000_000 / rate);
 
         sched.push(RequestSchedule {
+            // arrival: Distribution::Constant((nthreads * 1000_000_000 / rate) as u64),
             arrival: Distribution::Exponential((nthreads * 1000_000_000 / rate) as f64),
             service: distribution,
             output: OutputMode::Silent,
@@ -402,6 +403,7 @@ fn gen_classic_packet_schedule(
     // println!("{} pps : {} ns", packets_per_second, ns_per_packet);
 
     sched.push(RequestSchedule {
+        // arrival: Distribution::Constant(ns_per_packet as u64),
         arrival: Distribution::Exponential(ns_per_packet as f64),
         service: distribution,
         output: output,
@@ -432,6 +434,7 @@ fn gen_loadshift_experiment(
                 _ => unreachable!(),
             };
             RequestSchedule {
+                // arrival: Distribution::Constant(ns_per_packet as u64),
                 arrival: Distribution::Exponential(ns_per_packet as f64),
                 service: service,
                 output: output,
@@ -739,12 +742,12 @@ fn gen_packets_for_schedule(schedules: &Arc<Vec<RequestSchedule>>) -> (Vec<Packe
     let mut packets: Vec<Packet> = Vec::new();
     let mut rng: Mt64 = Mt64::new(rand::thread_rng().gen::<u64>());
     let mut sched_boundaries = Vec::new();
-    let mut last = 100_000_000;
+    let mut last = 100_000_000; //as u64 + rng.gen::<u64>() % 5;
     let mut end = 100_000_000;
     
     if let Some(onoff) = unsafe{ &ONOFF } {
         if onoff == "1" {
-            eprintln!("Running with On/Off pattern");
+            // eprintln!("Running with On/Off pattern");
             let seed = rng.gen();
             let mut rand_gaussian = 0.0; // Replace with your random Gaussian value
             let mut important_rand = StdRng::seed_from_u64(seed);
@@ -764,8 +767,8 @@ fn gen_packets_for_schedule(schedules: &Arc<Vec<RequestSchedule>>) -> (Vec<Packe
                 loop{
                     rand_gaussian = normal.sample(&mut important_rand);
                     let interval_in_ns = match is_on {
-                        true => std::cmp::min( (lognormal_on(rand_gaussian) * 1000.0) as u64, end - onoff_timestamp ),
-                        false => std::cmp::min( (lognormal_off(rand_gaussian) * 1000.0) as u64, end - onoff_timestamp ),
+                        true => std::cmp::min( (lognormal_on(rand_gaussian) * 1000000.0) as u64, end - onoff_timestamp ),
+                        false => std::cmp::min( (lognormal_on(rand_gaussian) * 1000000.0) as u64, end - onoff_timestamp ),
                     };
                     
                     onoff_intervals.push((is_on, (onoff_timestamp, onoff_timestamp + interval_in_ns)));
@@ -780,7 +783,7 @@ fn gen_packets_for_schedule(schedules: &Arc<Vec<RequestSchedule>>) -> (Vec<Packe
                     is_on = !is_on;
                 }
                 let mut ontime_weight = total_on_time as f64 / duration_to_ns(sched.runtime) as f64;
-                println!("total_on_time: {}", total_on_time);
+                // println!("total_on_time: {}", total_on_time);
                 
                 // onoff_intervals = vec![
                 //     (true, (100_000_000, 2_100_000_000)),
@@ -812,7 +815,7 @@ fn gen_packets_for_schedule(schedules: &Arc<Vec<RequestSchedule>>) -> (Vec<Packe
             }
         }
         else{
-            eprintln!("Running w/o On/Off pattern");
+            // eprintln!("Running w/o On/Off pattern");
             for sched in schedules.iter() {
                 end += duration_to_ns(sched.runtime);
                 
@@ -826,6 +829,7 @@ fn gen_packets_for_schedule(schedules: &Arc<Vec<RequestSchedule>>) -> (Vec<Packe
         
                     let nxt = last + sched.arrival.sample(&mut rng);
                     if nxt >= end {
+                        last = nxt;
                         break;
                     }
                     last = nxt;
@@ -1312,7 +1316,8 @@ fn zipf_gen_classic_packet_schedule(
         // eprintln!("rampup {} pps : {} ns", rate as usize, ns_per_packet as usize);
 
         sched.push(RequestSchedule {
-            arrival: Distribution::Exponential(ns_per_packet),
+            // arrival: Distribution::Constant(ns_per_packet as u64),
+            arrival: Distribution::Exponential(ns_per_packet as f64),
             service: distribution,
             output: OutputMode::Silent,
             runtime: Duration::from_millis(100),
@@ -1323,10 +1328,11 @@ fn zipf_gen_classic_packet_schedule(
 
     let ns_per_packet = 1_000_000_000.0 / pps;
 
-    // eprintln!("{} pps : {} ns per packet", pps as usize, ns_per_packet as usize);
-
+    eprint!("{}    ", pps as usize);
+    
     sched.push(RequestSchedule {
-        arrival: Distribution::Exponential(ns_per_packet),
+        // arrival: Distribution::Constant(ns_per_packet as u64),
+        arrival: Distribution::Exponential(ns_per_packet as f64),
         service: distribution,
         output,
         runtime,
@@ -1357,16 +1363,17 @@ fn zipf_gen_loadshift_experiment(
                     3 => OutputMode::Silent,
                     _ => unreachable!(),
                 };
-    
+                // eprintln!("\n"); 
                 ppss.push(packets_per_second as usize);
                 get_zipf_distribution(packets_per_second as usize, alpha, nthreads)
                     .enumerate()
                     .for_each(|(i, pps)| {
                         let ns_per_packet = 1_000_000_000.0 / pps;
-                        // eprintln!("{} pps : {} ns", pps as usize, ns_per_packet as usize);
+                        // eprint!("{}    ", pps as usize);
                         acc[i].push(
                             RequestSchedule {
-                                arrival: Distribution::Exponential(ns_per_packet),
+                                // arrival: Distribution::Constant(ns_per_packet as u64),
+                                arrival: Distribution::Exponential(ns_per_packet as f64),
                                 service,
                                 output,
                                 runtime: Duration::from_micros(micros),
@@ -1541,75 +1548,43 @@ fn zipf_process_result_final(
 
 
     if let OutputMode::Trace = scheds[0].output {
-        let mut cnt_map: HashMap<u64, u64> = HashMap::new();
-        let mut sum_lat_map: HashMap<u64, u64> = HashMap::new();
-        
-        for p in results.into_iter().filter_map(|p| p.trace).kmerge() {
-            
-            if let Some(completion_time) = p.completion_time {
-                let actual_start = p.actual_start.unwrap();
-                // println!(
-                //     "{},{}",
-                //     duration_to_ns(actual_start),
-                //     // duration_to_ns(actual_start) as i64 - duration_to_ns(p.target_start) as i64,
-                //     duration_to_ns(completion_time - actual_start),
-                //     // p.server_tsc,
-                // )
-                let ms = ( (duration_to_ns(actual_start) / 1000000) / 10 ) * 10;
-                let lat = duration_to_ns(completion_time - actual_start) as u64 / 1000;
-
-                let count = cnt_map.entry(ms).or_insert(0);
-                *count += 1;
-
-                let sum_lat = sum_lat_map.entry(ms).or_insert(0);
-                *sum_lat += lat;
-            } 
-            // else if p.actual_start.is_some() {
-            //     let actual_start = p.actual_start.unwrap();
-            //     print!(
-            //         "{}:{}:-1:-1 ",
-            //         duration_to_ns(actual_start),
-            //         duration_to_ns(actual_start) as i64 - duration_to_ns(p.target_start) as i64,
-            //     )
-            // } else {
-            //     print!("{}:-1:-1:-1 ", duration_to_ns(p.target_start))
-            // }
-        }
-        let mut avg_lat_map: HashMap<u64, u64> = HashMap::new();
-        for (ms, count) in &cnt_map {
-            if let Some(&sum_lat) = sum_lat_map.get(ms) {
-                let avg_lat = sum_lat / *count;
-                avg_lat_map.insert(*ms, avg_lat);
-            }
-        }
-
-        // Convert avg_lat_map into a BTreeMap for sorting by keys
-        let sorted_avg_lat_map: BTreeMap<u64, u64> = avg_lat_map.into_iter().collect();
-        
         if let Some(exptid) = unsafe {&EXPTID} {
             if exptid != "null" {
-                let file_path = format!("{}.latency_trace", exptid);
-                // Open the file in append mode using OpenOptions
-                if let Ok(mut file) = OpenOptions::new()
-                    .append(true)
-                    .create(true)
-                    .open(&file_path) 
-                {
-                    for (ms, avg_lat) in sorted_avg_lat_map.iter() {
-                        writeln!(file, "{},{}", ms, avg_lat).expect("Failed to write to file");
+                
+                let lat_file_path = format!("{}.latency_trace", exptid);
+                let mut lat_file = OpenOptions::new()
+                                                .append(true)
+                                                .create(true)
+                                                .open(&lat_file_path)
+                                                .expect("Failed to open file");
+                
+                // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
+                // let recvq_file_path = format!("{}.recv_qlen", exptid);
+                // let mut recvq_file = OpenOptions::new()
+                //                                 .append(true)
+                //                                 .create(true)
+                //                                 .open(&recvq_file_path)
+                //                                 .expect("Failed to open file");
+                // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
+
+
+                for p in results.into_iter().filter_map(|p| p.trace).kmerge() {
+                    
+                    if let Some(completion_time) = p.completion_time {
+                        let actual_start = duration_to_ns(p.actual_start.unwrap());
+                        let lat_in_us = duration_to_ns(completion_time - p.actual_start.unwrap()) as u64 / 1000;
+                        // unsafe{ LATENCY_TRACE_RESULTS.push((duration_to_ns(actual_start), lat)) };
+                        writeln!(lat_file, "{},{}", actual_start, lat_in_us).expect("Failed to write to lat_file");
+                        
+                        
+                        // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
+                        // let recv_qlen = p.server_tsc;
+                        // writeln!(recvq_file, "{},{},{}", actual_start, lat_in_us, recv_qlen).expect("Failed to write to recvq_file");
+                        // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
                     }
                 }
             }
-            else {
-                // Iterate and print the elements in ascending order of keys
-                for (ms, avg_lat) in sorted_avg_lat_map.iter() {
-                    println!("{},{}", ms, avg_lat);
-                }
-            }
         }
-        
-
-        // println!("");
     }
 
     true
@@ -1736,7 +1711,7 @@ fn zipf_run_client(
         let sched_start = sched_starts.into_iter().min().unwrap();
 
         ret = zipf_process_result_final(total_pps, scheds, results, start_unix, sched_start) && ret;
-        eprintln!("\n*******************************************\n");
+        // eprintln!("\n*******************************************\n");
     }
 
     ret
@@ -2043,6 +2018,14 @@ fn main() {
         EXPTID = Some(exptid.clone());
         ONOFF = Some(onoff.clone());
     }
+
+    if let Some(onoff) = unsafe{ &ONOFF } {
+        if onoff == "1" {
+            eprintln!("Running with On/Off pattern");
+        }else {
+            eprintln!("Running w/o On/Off pattern");
+        }
+    }
     let addrs: Vec<SocketAddrV4> = matches
         .values_of("ADDR")
         .unwrap()
@@ -2256,7 +2239,7 @@ fn main() {
                     if let Some(alpha) = zipf {    
                         let (schedules, ppss) = zipf_gen_loadshift_experiment(&loadshift_spec, distribution, nthreads, alpha, output);
                         let schedules = schedules.into_iter().map(|e| Arc::new(e)).collect();
-                        eprintln!("ppss: {:?}", ppss);
+                        eprintln!("\n\nppss: {:?}", ppss);
                         zipf_run_client(
                             ppss,
                             proto,
@@ -2316,7 +2299,7 @@ fn main() {
 
                 if let Some(alpha) = zipf {
                     let pps_distribution = get_zipf_distribution(packets_per_second, alpha, nthreads);
-
+                    eprintln!("\n");
                     let schedules = pps_distribution.map(|pps| {
                         Arc::new(zipf_gen_classic_packet_schedule(
                             runtime,
@@ -2327,7 +2310,7 @@ fn main() {
                             discard_pct
                         ))
                     }).collect_vec();
-
+                    eprintln!("\n");
                     zipf_run_client(
                         vec![packets_per_second],
                         proto,
