@@ -393,7 +393,7 @@ static int tcp_tx_retransmit_one(tcpconn_t *c, struct mbuf *m)
 
 	/* transmit the packet */
 	tcp_debug_egress_pkt(c, m);
-	// printf("TCP TIMEOUT\n");
+	
 	fflush(stdout); 
 	ret = net_tx_ip(m, IPPROTO_TCP, c->e.raddr.ip);
 	if (unlikely(ret))
@@ -426,6 +426,7 @@ struct mbuf *tcp_tx_fast_retransmit_start(tcpconn_t *c)
 void tcp_tx_fast_retransmit_finish(tcpconn_t *c, struct mbuf *m)
 {
 	if (m) {
+		printf("FAST RETRANSMISSION\n");
 		tcp_tx_retransmit_one(c, m);
 		mbuf_free(m);
 	}
@@ -454,6 +455,7 @@ void tcp_tx_retransmit(tcpconn_t *c)
 			continue;
 
 		m->timestamp = now;
+		printf("TIMEOUT\n");
 		ret = tcp_tx_retransmit_one(c, m);
 		if (ret)
 			break;

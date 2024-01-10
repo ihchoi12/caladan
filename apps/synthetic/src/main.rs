@@ -620,10 +620,10 @@ fn process_result_final(
                 for p in results.into_iter().filter_map(|p| p.trace).kmerge() {
                     
                     if let Some(completion_time) = p.completion_time {
-                        let actual_start = duration_to_ns(p.actual_start.unwrap());
+                        let target_start = duration_to_ns(p.target_start);
                         let lat_in_us = duration_to_ns(completion_time - p.actual_start.unwrap()) as u64 / 1000;
                         // unsafe{ LATENCY_TRACE_RESULTS.push((duration_to_ns(actual_start), lat)) };
-                        writeln!(lat_file, "{},{}", actual_start, lat_in_us).expect("Failed to write to lat_file");
+                        writeln!(lat_file, "{},{}", target_start, lat_in_us).expect("Failed to write to lat_file");
                         
                         
                         // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
@@ -740,7 +740,10 @@ fn lognormal(mu: f64, sigma: f64, rand_gaussian: f64) -> f64 {
 fn gen_packets_for_schedule(schedules: &Arc<Vec<RequestSchedule>>) -> (Vec<Packet>, Vec<usize>) {
     use rand_distr::Distribution;
     let mut packets: Vec<Packet> = Vec::new();
-    let mut rng: Mt64 = Mt64::new(rand::thread_rng().gen::<u64>());
+    
+    // let mut rng: Mt64 = Mt64::new(rand::thread_rng().gen::<u64>());
+    let mut rng: Mt64 = Mt64::new(292383402);
+    
     let mut sched_boundaries = Vec::new();
     let mut last = 100_000_000; //as u64 + rng.gen::<u64>() % 5;
     let mut end = 100_000_000;
@@ -748,9 +751,10 @@ fn gen_packets_for_schedule(schedules: &Arc<Vec<RequestSchedule>>) -> (Vec<Packe
     if let Some(onoff) = unsafe{ &ONOFF } {
         if onoff == "1" {
             // eprintln!("Running with On/Off pattern");
-            let seed = rng.gen();
+            // let seed = rng.gen();
+            let seed = 292383402;
             let mut rand_gaussian = 0.0; // Replace with your random Gaussian value
-            let mut important_rand = StdRng::seed_from_u64(seed);
+            let mut important_rand: StdRng = StdRng::seed_from_u64(seed);
 
             // Define the mean (mu) and standard deviation (sigma) of the Gaussian distribution
             let mu = 0.0;
@@ -1343,12 +1347,13 @@ fn zipf_gen_classic_packet_schedule(
     sched
 }
 
-fn zipf_gen_loadshift_experiment(
+fn zipf_gen_loadshift_experiment<R: Rng>(
     spec: &str,
     service: Distribution,
     nthreads: usize,
     alpha: f64,
     output: OutputMode,
+    rng: &mut R,
 ) -> (Vec<Vec<RequestSchedule>>, Vec<usize>) {
     spec.split(",")
         .fold(
@@ -1382,7 +1387,12 @@ fn zipf_gen_loadshift_experiment(
                             }
                         );
                     });
-                acc.shuffle(&mut rand::thread_rng());
+                acc.shuffle(rng);
+                // for schedule_vec in &acc {
+                //     for schedule in schedule_vec {
+                //         eprint!("{}     ", schedule.rps);
+                //     }
+                // }eprint!("\n\n");
                 (acc, ppss)
             }
         )
@@ -1571,10 +1581,10 @@ fn zipf_process_result_final(
                 for p in results.into_iter().filter_map(|p| p.trace).kmerge() {
                     
                     if let Some(completion_time) = p.completion_time {
-                        let actual_start = duration_to_ns(p.actual_start.unwrap());
+                        let target_start = duration_to_ns(p.target_start);
                         let lat_in_us = duration_to_ns(completion_time - p.actual_start.unwrap()) as u64 / 1000;
                         // unsafe{ LATENCY_TRACE_RESULTS.push((duration_to_ns(actual_start), lat)) };
-                        writeln!(lat_file, "{},{}", actual_start, lat_in_us).expect("Failed to write to lat_file");
+                        writeln!(lat_file, "{},{}", target_start, lat_in_us).expect("Failed to write to lat_file");
                         
                         
                         // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
@@ -2236,8 +2246,9 @@ fn main() {
                 }
 
                 if !loadshift_spec.is_empty() {
-                    if let Some(alpha) = zipf {    
-                        let (schedules, ppss) = zipf_gen_loadshift_experiment(&loadshift_spec, distribution, nthreads, alpha, output);
+                    if let Some(alpha) = zipf { 
+                        let mut rng: StdRng = StdRng::seed_from_u64(292383402);   
+                        let (schedules, ppss) = zipf_gen_loadshift_experiment(&loadshift_spec, distribution, nthreads, alpha, output, &mut rng);
                         let schedules = schedules.into_iter().map(|e| Arc::new(e)).collect();
                         eprintln!("\n\nppss: {:?}", ppss);
                         zipf_run_client(
