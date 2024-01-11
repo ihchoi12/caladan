@@ -165,7 +165,7 @@ impl LoadgenProtocol for HttpProtocol {
         let mut pstate = ParseState::new();
 
         // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
-        // while buf.data_size() < 8 {
+        // while buf.data_size() < 10 {
         //     buf.try_shrink()?;
         //     let new_bytes = sock.read(buf.get_empty_buf())?;
         //     if new_bytes == 0 {
@@ -173,8 +173,9 @@ impl LoadgenProtocol for HttpProtocol {
         //     }
         //     buf.push_data(new_bytes);
         // }
-        // let queue_len = u64::from_be_bytes(buf.get_data()[0..8].try_into().unwrap());
-        // buf.pull_data(8);
+        // let server_port = u16::from_be_bytes(buf.get_data()[0..2].try_into().unwrap());
+        // let queue_len = u64::from_be_bytes(buf.get_data()[2..10].try_into().unwrap());
+        // buf.pull_data(10);
         // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
 
         if buf.data_size() == 0 {
@@ -223,7 +224,7 @@ impl LoadgenProtocol for HttpProtocol {
             }
 
             // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
-            // return Ok((0, queue_len));
+            // return Ok((server_port as usize, queue_len));
             // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
 
             return Ok((0, 0))

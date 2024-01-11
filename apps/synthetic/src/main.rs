@@ -53,6 +53,7 @@ pub struct Packet {
     completion_time_ns: AtomicU64,
     completion_server_tsc: Option<u64>,
     completion_time: Option<Duration>,
+    server_port: Option<u16>,
 }
 
 mod fakework;
@@ -338,6 +339,7 @@ struct TraceResult {
     target_start: Duration,
     completion_time: Option<Duration>,
     server_tsc: u64,
+    server_port: Option<u16>,
 }
 
 impl PartialOrd for TraceResult {
@@ -628,7 +630,9 @@ fn process_result_final(
                         
                         // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
                         // let recv_qlen = p.server_tsc;
-                        // writeln!(recvq_file, "{},{},{}", actual_start, lat_in_us, recv_qlen).expect("Failed to write to recvq_file");
+                        // let server_port = p.server_port.unwrap();
+                        
+                        // writeln!(recvq_file, "{},{},{},{}", target_start, lat_in_us, recv_qlen, server_port).expect("Failed to write to recvq_file");
                         // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
                     }
                 }
@@ -697,6 +701,7 @@ fn process_result(sched: &RequestSchedule, packets: &mut [Packet]) -> Option<Sch
                         target_start: p.target_start,
                         completion_time: p.completion_time,
                         server_tsc: p.completion_server_tsc.unwrap(),
+                        server_port: p.server_port,
                     })
                 })
                 .collect();
@@ -877,7 +882,7 @@ fn run_client_worker(
     
     let receive_thread = backend.spawn_thread(move || {
         let mut recv_buf = vec![0; 4096];
-        let mut receive_times = vec![None; packets_per_thread];
+        let mut receive_times: Vec<Option<(Instant, u64, u16)>> = vec![None; packets_per_thread];
         let mut buf = Buffer::new(&mut recv_buf);
         let use_ordering = rproto.uses_ordered_requests();
         wg2.done();
@@ -886,11 +891,12 @@ fn run_client_worker(
             // eprintln!("{} {}", i, receive_times.len());
             match rproto.read_response(&socket2, &mut buf) {
                 Ok((mut idx, tsc)) => {
+                    let port = idx as u16;
                     if use_ordering {
                         idx = i;
                     }
                     // eprintln!("receive");
-                    receive_times[idx] = Some((Instant::now(), tsc));
+                    receive_times[idx] = Some((Instant::now(), tsc, port));
                     recv_cnt += 1;
                     received_packets2.store(recv_cnt, Ordering::SeqCst)
                 }
@@ -998,9 +1004,10 @@ fn run_client_worker(
                 .filter(|p| !proto.uses_ordered_requests() || p.actual_start.is_some()),
         )
         .for_each(|(c, p)| {
-            if let Some((inst, tsc)) = c {
+            if let Some((inst, tsc, port)) = c {
                 (*p).completion_time = Some(inst - start);
                 (*p).completion_server_tsc = Some(tsc);
+                (*p).server_port = Some(port);
             }
         });
 
@@ -1589,7 +1596,9 @@ fn zipf_process_result_final(
                         
                         // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
                         // let recv_qlen = p.server_tsc;
-                        // writeln!(recvq_file, "{},{},{}", actual_start, lat_in_us, recv_qlen).expect("Failed to write to recvq_file");
+                        // let server_port = p.server_port.unwrap();
+                        
+                        // writeln!(recvq_file, "{},{},{},{}", target_start, lat_in_us, recv_qlen, server_port).expect("Failed to write to recvq_file");
                         // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
                     }
                 }
