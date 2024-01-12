@@ -54,6 +54,7 @@ pub struct Packet {
     completion_server_tsc: Option<u64>,
     completion_time: Option<Duration>,
     server_port: Option<u16>,
+    client_port: Option<u16>,
     queue_len: Option<u32>,
 }
 
@@ -341,6 +342,7 @@ struct TraceResult {
     completion_time: Option<Duration>,
     server_tsc: u64,
     server_port: Option<u16>,
+    client_port: Option<u16>,
     queue_len: Option<u32>,
 }
 
@@ -627,7 +629,7 @@ fn process_result_final(
                         let target_start = duration_to_ns(p.target_start);
                         let lat_in_us = duration_to_ns(completion_time - p.actual_start.unwrap()) as u64 / 1000;
                         // unsafe{ LATENCY_TRACE_RESULTS.push((duration_to_ns(actual_start), lat)) };
-                        writeln!(lat_file, "{},{}", target_start, lat_in_us).expect("Failed to write to lat_file");
+                        writeln!(lat_file, "{},{},{}", target_start, lat_in_us, p.client_port.unwrap()).expect("Failed to write to lat_file");
                         
                         
                         // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
@@ -705,6 +707,7 @@ fn process_result(sched: &RequestSchedule, packets: &mut [Packet]) -> Option<Sch
                         completion_time: p.completion_time,
                         server_tsc: p.completion_server_tsc.unwrap(),
                         server_port: p.server_port,
+                        client_port: p.client_port,
                         queue_len: p.queue_len,
                     })
                 })
@@ -886,7 +889,8 @@ fn run_client_worker(
     
     let receive_thread = backend.spawn_thread(move || {
         let mut recv_buf = vec![0; 4096];
-        let mut receive_times: Vec<Option<(Instant, u64, u16, u32)>> = vec![None; packets_per_thread];
+        // (Instant, tsc, server port, client port, queue len)
+        let mut receive_times: Vec<Option<(Instant, u64, u16, u16, u32)>> = vec![None; packets_per_thread];
         let mut buf = Buffer::new(&mut recv_buf);
         let use_ordering = rproto.uses_ordered_requests();
         wg2.done();
@@ -895,13 +899,13 @@ fn run_client_worker(
             // eprintln!("{} {}", i, receive_times.len());
             match rproto.read_response(&socket2, &mut buf) {
                 Ok((mut idx, tsc)) => {
-                    let port = (idx >> 32) as u16;
+                    let server_port = (idx >> 32) as u16;
                     let queue_len = (idx & 0xffff_ffff) as u32;
                     if use_ordering {
                         idx = i;
                     }
                     // eprintln!("receive");
-                    receive_times[idx] = Some((Instant::now(), tsc, port, queue_len));
+                    receive_times[idx] = Some((Instant::now(), tsc, server_port, src_addr.port(), queue_len));
                     recv_cnt += 1;
                     received_packets2.store(recv_cnt, Ordering::SeqCst)
                 }
@@ -1009,10 +1013,11 @@ fn run_client_worker(
                 .filter(|p| !proto.uses_ordered_requests() || p.actual_start.is_some()),
         )
         .for_each(|(c, p)| {
-            if let Some((inst, tsc, port, queue_len)) = c {
+            if let Some((inst, tsc, server_port, client_port, queue_len)) = c {
                 (*p).completion_time = Some(inst - start);
                 (*p).completion_server_tsc = Some(tsc);
-                (*p).server_port = Some(port);
+                (*p).server_port = Some(server_port);
+                (*p).client_port = Some(client_port);
                 (*p).queue_len = Some(queue_len);
             }
         });
@@ -1022,7 +1027,7 @@ fn run_client_worker(
         .iter()
         .zip(sched_boundaries)
         .map(|(sched, end)| {
-            let res = process_result(&sched, &mut packets[start_index..end]);
+            let mut res = process_result(&sched, &mut packets[start_index..end]);
             start_index = end;
             res
         })
@@ -1597,7 +1602,7 @@ fn zipf_process_result_final(
                         let target_start = duration_to_ns(p.target_start);
                         let lat_in_us = duration_to_ns(completion_time - p.actual_start.unwrap()) as u64 / 1000;
                         // unsafe{ LATENCY_TRACE_RESULTS.push((duration_to_ns(actual_start), lat)) };
-                        writeln!(lat_file, "{},{}", target_start, lat_in_us).expect("Failed to write to lat_file");
+                        writeln!(lat_file, "{},{},{}", target_start, lat_in_us, p.client_port.unwrap()).expect("Failed to write to lat_file");
                         
                         
                         // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
