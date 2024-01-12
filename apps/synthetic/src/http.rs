@@ -165,7 +165,7 @@ impl LoadgenProtocol for HttpProtocol {
         let mut pstate = ParseState::new();
 
         // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
-        // while buf.data_size() < 10 {
+        // while buf.data_size() < 14 {
         //     buf.try_shrink()?;
         //     let new_bytes = sock.read(buf.get_empty_buf())?;
         //     if new_bytes == 0 {
@@ -173,9 +173,11 @@ impl LoadgenProtocol for HttpProtocol {
         //     }
         //     buf.push_data(new_bytes);
         // }
-        // let server_port = u16::from_be_bytes(buf.get_data()[0..2].try_into().unwrap());
-        // let queue_len = u64::from_be_bytes(buf.get_data()[2..10].try_into().unwrap());
-        // buf.pull_data(10);
+        // let server_port = u16::from_be_bytes(buf.get_data()[0..2].try_into().unwrap()) as usize;
+        // let queue_len = u32::from_be_bytes(buf.get_data()[2..6].try_into().unwrap()) as usize;
+        // let nanos = u64::from_be_bytes(buf.get_data()[6..14].try_into().unwrap());
+        // buf.pull_data(14);
+        // let port_and_qlen = (server_port << 32) | queue_len;
         // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
 
         if buf.data_size() == 0 {
@@ -224,7 +226,7 @@ impl LoadgenProtocol for HttpProtocol {
             }
 
             // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
-            // return Ok((server_port as usize, queue_len));
+            // return Ok((port_and_qlen, nanos));
             // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
 
             return Ok((0, 0))

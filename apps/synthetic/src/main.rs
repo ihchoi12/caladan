@@ -54,6 +54,7 @@ pub struct Packet {
     completion_server_tsc: Option<u64>,
     completion_time: Option<Duration>,
     server_port: Option<u16>,
+    queue_len: Option<u32>,
 }
 
 mod fakework;
@@ -340,6 +341,7 @@ struct TraceResult {
     completion_time: Option<Duration>,
     server_tsc: u64,
     server_port: Option<u16>,
+    queue_len: Option<u32>,
 }
 
 impl PartialOrd for TraceResult {
@@ -629,10 +631,11 @@ fn process_result_final(
                         
                         
                         // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
-                        // let recv_qlen = p.server_tsc;
+                        // let tsc = p.server_tsc;
                         // let server_port = p.server_port.unwrap();
+                        // let recv_qlen = p.queue_len.unwrap();
                         
-                        // writeln!(recvq_file, "{},{},{},{}", target_start, lat_in_us, recv_qlen, server_port).expect("Failed to write to recvq_file");
+                        // writeln!(recvq_file, "{},{},{},{},{}", target_start, lat_in_us, recv_qlen, server_port, tsc).expect("Failed to write to recvq_file");
                         // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
                     }
                 }
@@ -702,6 +705,7 @@ fn process_result(sched: &RequestSchedule, packets: &mut [Packet]) -> Option<Sch
                         completion_time: p.completion_time,
                         server_tsc: p.completion_server_tsc.unwrap(),
                         server_port: p.server_port,
+                        queue_len: p.queue_len,
                     })
                 })
                 .collect();
@@ -882,7 +886,7 @@ fn run_client_worker(
     
     let receive_thread = backend.spawn_thread(move || {
         let mut recv_buf = vec![0; 4096];
-        let mut receive_times: Vec<Option<(Instant, u64, u16)>> = vec![None; packets_per_thread];
+        let mut receive_times: Vec<Option<(Instant, u64, u16, u32)>> = vec![None; packets_per_thread];
         let mut buf = Buffer::new(&mut recv_buf);
         let use_ordering = rproto.uses_ordered_requests();
         wg2.done();
@@ -891,12 +895,13 @@ fn run_client_worker(
             // eprintln!("{} {}", i, receive_times.len());
             match rproto.read_response(&socket2, &mut buf) {
                 Ok((mut idx, tsc)) => {
-                    let port = idx as u16;
+                    let port = (idx >> 32) as u16;
+                    let queue_len = (idx & 0xffff_ffff) as u32;
                     if use_ordering {
                         idx = i;
                     }
                     // eprintln!("receive");
-                    receive_times[idx] = Some((Instant::now(), tsc, port));
+                    receive_times[idx] = Some((Instant::now(), tsc, port, queue_len));
                     recv_cnt += 1;
                     received_packets2.store(recv_cnt, Ordering::SeqCst)
                 }
@@ -1004,10 +1009,11 @@ fn run_client_worker(
                 .filter(|p| !proto.uses_ordered_requests() || p.actual_start.is_some()),
         )
         .for_each(|(c, p)| {
-            if let Some((inst, tsc, port)) = c {
+            if let Some((inst, tsc, port, queue_len)) = c {
                 (*p).completion_time = Some(inst - start);
                 (*p).completion_server_tsc = Some(tsc);
                 (*p).server_port = Some(port);
+                (*p).queue_len = Some(queue_len);
             }
         });
 
@@ -1595,10 +1601,11 @@ fn zipf_process_result_final(
                         
                         
                         // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
-                        // let recv_qlen = p.server_tsc;
+                        // let tsc = p.server_tsc;
                         // let server_port = p.server_port.unwrap();
+                        // let recv_qlen = p.queue_len.unwrap();
                         
-                        // writeln!(recvq_file, "{},{},{},{}", target_start, lat_in_us, recv_qlen, server_port).expect("Failed to write to recvq_file");
+                        // writeln!(recvq_file, "{},{},{},{},{}", target_start, lat_in_us, recv_qlen, server_port, tsc).expect("Failed to write to recvq_file");
                         // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
                     }
                 }
