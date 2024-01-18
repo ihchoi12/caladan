@@ -736,12 +736,8 @@ fn lognormal_interarrival(rand_gaussian: f64) -> f64 {
     lognormal(6.2726064589176, 1.8779582422664103, rand_gaussian)/10.0
 }
 
-fn lognormal_on(rand_gaussian: f64) -> f64 {
+fn lognormal_onoff(rand_gaussian: f64) -> f64 {
     lognormal(2.868183746231741, 0.4301567266932548, rand_gaussian)
-}
-
-fn lognormal_off(rand_gaussian: f64) -> f64 {
-    lognormal(1.0872546045494296, 0.38168878514903204, rand_gaussian)
 }
 /* unit: microseconds */
 
@@ -749,12 +745,14 @@ fn lognormal(mu: f64, sigma: f64, rand_gaussian: f64) -> f64 {
     f64::exp(mu + sigma * rand_gaussian)
 }
 
-fn gen_packets_for_schedule(schedules: &Arc<Vec<RequestSchedule>>) -> (Vec<Packet>, Vec<usize>) {
+fn gen_packets_for_schedule(schedules: &Arc<Vec<RequestSchedule>>, seed: u64) -> (Vec<Packet>, Vec<usize>) {
     use rand_distr::Distribution;
     let mut packets: Vec<Packet> = Vec::new();
     
-    // let mut rng: Mt64 = Mt64::new(rand::thread_rng().gen::<u64>());
-    let mut rng: Mt64 = Mt64::new(292383402);
+    let mut rng: Mt64 = match seed{
+        0 => Mt64::new(rand::thread_rng().gen::<u64>()),
+        _ => Mt64::new(seed),
+    };
     
     let mut sched_boundaries = Vec::new();
     let mut last = 100_000_000; //as u64 + rng.gen::<u64>() % 5;
@@ -763,42 +761,37 @@ fn gen_packets_for_schedule(schedules: &Arc<Vec<RequestSchedule>>) -> (Vec<Packe
     if let Some(onoff) = unsafe{ &ONOFF } {
         if onoff == "1" {
             // eprintln!("Running with On/Off pattern");
-            // let seed = rng.gen();
-            let seed = 292383402;
-            let mut rand_gaussian = 0.0; // Replace with your random Gaussian value
             let mut important_rand: StdRng = StdRng::seed_from_u64(seed);
 
             // Define the mean (mu) and standard deviation (sigma) of the Gaussian distribution
             let mu = 0.0;
             let sigma = 1.0;
             let normal = Normal::new(mu, sigma).unwrap();    
-            
+            let mut is_on = false;
+            let mut onoff_timestamp = last;
             for sched in schedules.iter() {
+                // eprintln!("{}, {:?}", seed, sched.arrival);
                 end += duration_to_ns(sched.runtime);
 
                 let mut onoff_intervals: Vec<(bool, (u64, u64))> = Vec::new();
-                let mut is_on = false;
-                let mut onoff_timestamp = last;
                 let mut total_on_time: u64 = 0;
                 loop{
-                    rand_gaussian = normal.sample(&mut important_rand);
-                    let interval_in_ns = match is_on {
-                        true => std::cmp::min( (lognormal_on(rand_gaussian) * 1000000.0) as u64, end - onoff_timestamp ),
-                        false => std::cmp::min( (lognormal_on(rand_gaussian) * 1000000.0) as u64, end - onoff_timestamp ),
-                    };
+                    let rand_gaussian = normal.sample(&mut important_rand);
+                    let interval_in_ns = std::cmp::min( (lognormal_onoff(rand_gaussian) * 1000000.0) as u64, end - onoff_timestamp );
                     
                     onoff_intervals.push((is_on, (onoff_timestamp, onoff_timestamp + interval_in_ns)));
+                    // eprintln!("{}, {}, {}, {}, {}", seed, is_on, onoff_timestamp, interval_in_ns, end);
                     onoff_timestamp = onoff_timestamp + interval_in_ns;
-
+                    
                     if is_on {
                         total_on_time = total_on_time + interval_in_ns;
                     }
+                    is_on = !is_on;
                     if onoff_timestamp == end {
                         break;
                     }
-                    is_on = !is_on;
                 }
-                let mut ontime_weight = total_on_time as f64 / duration_to_ns(sched.runtime) as f64;
+                let ontime_weight = total_on_time as f64 / duration_to_ns(sched.runtime) as f64;
                 // println!("total_on_time: {}", total_on_time);
                 
                 // onoff_intervals = vec![
@@ -813,6 +806,7 @@ fn gen_packets_for_schedule(schedules: &Arc<Vec<RequestSchedule>>) -> (Vec<Packe
                         if last >= *interval_end {
                             break;
                         }
+                        // eprintln!("{}, {}, {}", seed, last, is_on);
                         if *is_on {
                             packets.push(Packet {
                                 randomness: rng.gen::<u64>(),
@@ -836,6 +830,7 @@ fn gen_packets_for_schedule(schedules: &Arc<Vec<RequestSchedule>>) -> (Vec<Packe
                 end += duration_to_ns(sched.runtime);
                 
                 loop {
+                    // eprintln!("{}, {}", seed, last);
                     packets.push(Packet {
                         randomness: rng.gen::<u64>(),
                         target_start: Duration::from_nanos(last),
@@ -869,7 +864,7 @@ fn run_client_worker(
     live_mode_socket: Option<Arc<Connection>>,
 ) -> Vec<Option<ScheduleResult>> {
     let mut payload = Vec::with_capacity(4096);
-    let (mut packets, sched_boundaries) = gen_packets_for_schedule(&schedules);
+    let (mut packets, sched_boundaries) = gen_packets_for_schedule(&schedules, 100 + index as u64);
     let src_addr = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), (100 + index) as u16);
     let live_mode = live_mode_socket.is_some();
     let socket = match live_mode_socket {
@@ -1197,7 +1192,7 @@ fn run_local(
     let schedules = Arc::new(schedules);
 
     let packet_schedules: Vec<Vec<Packet>> = (0..nthreads)
-        .map(|_| gen_packets_for_schedule(&schedules).0)
+        .map(|_| gen_packets_for_schedule(&schedules, 0).0)
         .collect();
 
     let start_unix = SystemTime::now();
@@ -1308,11 +1303,17 @@ fn get_zipf_distribution(
         return zipf
     */
 
+    static mut COUNTER: u64 = 0;
+    unsafe{ COUNTER += 1; }
     let c = (1..nthreads + 1)
         .fold(0.0, |acc, i| acc + (i as f64).powf(alpha).recip())
         .recip();
 
-    (1..nthreads + 1).map(move |i| (total_pps as f64 * (c / (i as f64).powf(alpha))))
+    let mut range: Vec<_> = (1..=nthreads).collect();
+    
+    range.shuffle(&mut StdRng::seed_from_u64(unsafe{ COUNTER }));
+    // eprintln!("{:?}", range);
+    range.into_iter().map(move |i| (total_pps as f64 * (c / (i as f64).powf(alpha))))
 }
 
 fn zipf_gen_classic_packet_schedule(
@@ -1365,13 +1366,12 @@ fn zipf_gen_classic_packet_schedule(
     sched
 }
 
-fn zipf_gen_loadshift_experiment<R: Rng>(
+fn zipf_gen_loadshift_experiment(
     spec: &str,
     service: Distribution,
     nthreads: usize,
     alpha: f64,
     output: OutputMode,
-    rng: &mut R,
 ) -> (Vec<Vec<RequestSchedule>>, Vec<usize>) {
     spec.split(",")
         .fold(
@@ -1405,12 +1405,6 @@ fn zipf_gen_loadshift_experiment<R: Rng>(
                             }
                         );
                     });
-                acc.shuffle(rng);
-                // for schedule_vec in &acc {
-                //     for schedule in schedule_vec {
-                //         eprint!("{}     ", schedule.rps);
-                //     }
-                // }eprint!("\n\n");
                 (acc, ppss)
             }
         )
@@ -2268,10 +2262,14 @@ fn main() {
 
                 if !loadshift_spec.is_empty() {
                     if let Some(alpha) = zipf { 
-                        let mut rng: StdRng = StdRng::seed_from_u64(292383402);   
-                        let (schedules, ppss) = zipf_gen_loadshift_experiment(&loadshift_spec, distribution, nthreads, alpha, output, &mut rng);
+                        let (mut schedules, ppss) = zipf_gen_loadshift_experiment(&loadshift_spec, distribution, nthreads, alpha, output);
+                        // for schedule_vec in &schedules {
+                        //     for schedule in schedule_vec {
+                        //         eprintln!("{:?}", schedule.arrival);
+                        //     }
+                        //     eprint!("\n\n");
+                        // }
                         let schedules = schedules.into_iter().map(|e| Arc::new(e)).collect();
-                        eprintln!("\n\nppss: {:?}", ppss);
                         zipf_run_client(
                             ppss,
                             proto,
@@ -2293,7 +2291,7 @@ fn main() {
                             tport,
                             &mut barrier_group,
                             sched,
-                            0,
+                            1,
                         );
                     }
                     // write_latency_trace_results();
@@ -2323,7 +2321,7 @@ fn main() {
                             tport,
                             &mut barrier_group,
                             sched,
-                            0,
+                            1,
                         );
                     }
                     backend.sleep(Duration::from_secs(intersample_sleep));
