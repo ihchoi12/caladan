@@ -614,12 +614,12 @@ fn process_result_final(
                                                 .expect("Failed to open file");
                 
                 // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
-                // let recvq_file_path = format!("{}.recv_qlen", exptid);
-                // let mut recvq_file = OpenOptions::new()
-                //                                 .append(true)
-                //                                 .create(true)
-                //                                 .open(&recvq_file_path)
-                //                                 .expect("Failed to open file");
+                let recvq_file_path = format!("{}.recv_qlen", exptid);
+                let mut recvq_file = OpenOptions::new()
+                                                .append(true)
+                                                .create(true)
+                                                .open(&recvq_file_path)
+                                                .expect("Failed to open file");
                 // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
 
 
@@ -633,11 +633,11 @@ fn process_result_final(
                         
                         
                         // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
-                        // let tsc = p.server_tsc;
-                        // let server_port = p.server_port.unwrap();
-                        // let recv_qlen = p.queue_len.unwrap();
+                        let tsc = p.server_tsc;
+                        let server_port = p.server_port.unwrap();
+                        let recv_qlen = p.queue_len.unwrap();
                         
-                        // writeln!(recvq_file, "{},{},{},{},{}", target_start, lat_in_us, recv_qlen, server_port, tsc).expect("Failed to write to recvq_file");
+                        writeln!(recvq_file, "{},{},{},{},{}", target_start, lat_in_us, recv_qlen, server_port, tsc).expect("Failed to write to recvq_file");
                         // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
                     }
                 }
@@ -767,10 +767,11 @@ fn gen_packets_for_schedule(schedules: &Arc<Vec<RequestSchedule>>, seed: u64) ->
             let mu = 0.0;
             let sigma = 1.0;
             let normal = Normal::new(mu, sigma).unwrap();    
-            let mut is_on = false;
+            
             let mut onoff_timestamp = last;
             for sched in schedules.iter() {
                 // eprintln!("{}, {:?}", seed, sched.arrival);
+                let mut is_on = true;
                 end += duration_to_ns(sched.runtime);
 
                 let mut onoff_intervals: Vec<(bool, (u64, u64))> = Vec::new();
@@ -778,7 +779,9 @@ fn gen_packets_for_schedule(schedules: &Arc<Vec<RequestSchedule>>, seed: u64) ->
                 loop{
                     let rand_gaussian = normal.sample(&mut important_rand);
                     let interval_in_ns = std::cmp::min( (lognormal_onoff(rand_gaussian) * 1000000.0) as u64, end - onoff_timestamp );
-                    
+                    if onoff_timestamp + interval_in_ns == end {
+                        is_on = true;
+                    }
                     onoff_intervals.push((is_on, (onoff_timestamp, onoff_timestamp + interval_in_ns)));
                     // eprintln!("{}, {}, {}, {}, {}", seed, is_on, onoff_timestamp, interval_in_ns, end);
                     onoff_timestamp = onoff_timestamp + interval_in_ns;
@@ -1581,12 +1584,12 @@ fn zipf_process_result_final(
                                                 .expect("Failed to open file");
                 
                 // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
-                // let recvq_file_path = format!("{}.recv_qlen", exptid);
-                // let mut recvq_file = OpenOptions::new()
-                //                                 .append(true)
-                //                                 .create(true)
-                //                                 .open(&recvq_file_path)
-                //                                 .expect("Failed to open file");
+                let recvq_file_path = format!("{}.recv_qlen", exptid);
+                let mut recvq_file = OpenOptions::new()
+                                                .append(true)
+                                                .create(true)
+                                                .open(&recvq_file_path)
+                                                .expect("Failed to open file");
                 // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
 
 
@@ -1600,11 +1603,11 @@ fn zipf_process_result_final(
                         
                         
                         // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
-                        // let tsc = p.server_tsc;
-                        // let server_port = p.server_port.unwrap();
-                        // let recv_qlen = p.queue_len.unwrap();
+                        let tsc = p.server_tsc;
+                        let server_port = p.server_port.unwrap();
+                        let recv_qlen = p.queue_len.unwrap();
                         
-                        // writeln!(recvq_file, "{},{},{},{},{}", target_start, lat_in_us, recv_qlen, server_port, tsc).expect("Failed to write to recvq_file");
+                        writeln!(recvq_file, "{},{},{},{},{}", target_start, lat_in_us, recv_qlen, server_port, tsc).expect("Failed to write to recvq_file");
                         // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
                     }
                 }
