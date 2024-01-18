@@ -815,8 +815,8 @@ fn gen_packets_for_schedule(schedules: &Arc<Vec<RequestSchedule>>, seed: u64) ->
                                 ..Default::default()
                             });
                         }
-
                         let nxt = last + sched.arrival.onoff_sample(&mut rng, ontime_weight);
+                        // let nxt = last + sched.arrival.sample(&mut rng);
                         last = nxt;
                     }
                     
