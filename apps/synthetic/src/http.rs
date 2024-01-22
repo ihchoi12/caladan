@@ -164,21 +164,21 @@ impl LoadgenProtocol for HttpProtocol {
     fn read_response(&self, mut sock: &Connection, buf: &mut Buffer) -> io::Result<(usize, u64)> {
         let mut pstate = ParseState::new();
 
-        // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
-        while buf.data_size() < 14 {
-            buf.try_shrink()?;
-            let new_bytes = sock.read(buf.get_empty_buf())?;
-            if new_bytes == 0 {
-                return Err(Error::new(ErrorKind::UnexpectedEof, "eof"));
+        #[cfg(feature = "recv-queue-eval")]
+        let (stats, nanos) = {
+            while buf.data_size() < 16 {
+                buf.try_shrink()?;
+                let new_bytes = sock.read(buf.get_empty_buf())?;
+                if new_bytes == 0 {
+                    return Err(Error::new(ErrorKind::UnexpectedEof, "eof"));
+                }
+                buf.push_data(new_bytes);
             }
-            buf.push_data(new_bytes);
-        }
-        let server_port = u16::from_be_bytes(buf.get_data()[0..2].try_into().unwrap()) as usize;
-        let queue_len = u32::from_be_bytes(buf.get_data()[2..6].try_into().unwrap()) as usize;
-        let nanos = u64::from_be_bytes(buf.get_data()[6..14].try_into().unwrap());
-        buf.pull_data(14);
-        let port_and_qlen = (server_port << 32) | queue_len;
-        // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
+            let stats: usize = u64::from_be_bytes(buf.get_data()[0..8].try_into().unwrap()).try_into().expect("u64 to usize failed");
+            let nanos = u64::from_be_bytes(buf.get_data()[8..16].try_into().unwrap());
+            buf.pull_data(16);
+            (stats, nanos)
+        };
 
         if buf.data_size() == 0 {
             buf.try_shrink()?;
@@ -225,11 +225,10 @@ impl LoadgenProtocol for HttpProtocol {
                 }
             }
 
-            // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
-            return Ok((port_and_qlen, nanos));
-            // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
-
-            return Ok((0, 0))
+            #[cfg(feature = "recv-queue-eval")]
+            return Ok((stats, nanos));
+            #[cfg(not(feature = "recv-queue-eval"))]
+            return Ok((0, 0));
         }
     }
 }

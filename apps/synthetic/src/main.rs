@@ -56,6 +56,7 @@ pub struct Packet {
     server_port: Option<u16>,
     client_port: Option<u16>,
     queue_len: Option<u32>,
+    conn_count: Option<u16>,
 }
 
 mod fakework;
@@ -344,6 +345,7 @@ struct TraceResult {
     server_port: Option<u16>,
     client_port: Option<u16>,
     queue_len: Option<u32>,
+    conn_count: Option<u16>,
 }
 
 impl PartialOrd for TraceResult {
@@ -613,32 +615,32 @@ fn process_result_final(
                                                 .open(&lat_file_path)
                                                 .expect("Failed to open file");
                 
-                // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
-                let recvq_file_path = format!("{}.recv_qlen", exptid);
-                let mut recvq_file = OpenOptions::new()
-                                                .append(true)
-                                                .create(true)
-                                                .open(&recvq_file_path)
-                                                .expect("Failed to open file");
-                // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
-
+                #[cfg(feature = "recv-queue-eval")]
+                let mut recvq_file = {
+                    let recvq_file_path = format!("{}.recv_qlen", exptid);
+                    OpenOptions::new()
+                        .append(true)
+                        .create(true)
+                        .open(&recvq_file_path)
+                        .expect("Failed to open file")
+                };
 
                 for p in results.into_iter().filter_map(|p| p.trace).kmerge() {
-                    
                     if let Some(completion_time) = p.completion_time {
                         let target_start = duration_to_ns(p.target_start);
                         let lat_in_us = duration_to_ns(completion_time - p.actual_start.unwrap()) as u64 / 1000;
                         // unsafe{ LATENCY_TRACE_RESULTS.push((duration_to_ns(actual_start), lat)) };
                         writeln!(lat_file, "{},{},{}", target_start, lat_in_us, p.client_port.unwrap()).expect("Failed to write to lat_file");
                         
-                        
-                        // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
-                        let tsc = p.server_tsc;
-                        let server_port = p.server_port.unwrap();
-                        let recv_qlen = p.queue_len.unwrap();
-                        
-                        writeln!(recvq_file, "{},{},{},{},{}", target_start, lat_in_us, recv_qlen, server_port, tsc).expect("Failed to write to recvq_file");
-                        // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
+                        #[cfg(feature = "recv-queue-eval")]
+                        {
+                            let tsc = p.server_tsc;
+                            let server_port = p.server_port.unwrap();
+                            let recv_qlen = p.queue_len.unwrap();
+                            let conn_count = p.conn_count.unwrap();
+                            
+                            writeln!(recvq_file, "{target_start},{lat_in_us},{recv_qlen},{server_port},{conn_count},{tsc}").expect("Failed to write to recvq_file");
+                        }
                     }
                 }
             }
@@ -709,6 +711,7 @@ fn process_result(sched: &RequestSchedule, packets: &mut [Packet]) -> Option<Sch
                         server_port: p.server_port,
                         client_port: p.client_port,
                         queue_len: p.queue_len,
+                        conn_count: p.conn_count,
                     })
                 })
                 .collect();
@@ -887,8 +890,8 @@ fn run_client_worker(
     
     let receive_thread = backend.spawn_thread(move || {
         let mut recv_buf = vec![0; 4096];
-        // (Instant, tsc, server port, client port, queue len)
-        let mut receive_times: Vec<Option<(Instant, u64, u16, u16, u32)>> = vec![None; packets_per_thread];
+        // (Instant, tsc, server port, client port, queue len, conn count)
+        let mut receive_times: Vec<Option<(Instant, u64, u16, u16, u32, u16)>> = vec![None; packets_per_thread];
         let mut buf = Buffer::new(&mut recv_buf);
         let use_ordering = rproto.uses_ordered_requests();
         wg2.done();
@@ -897,13 +900,16 @@ fn run_client_worker(
             // eprintln!("{} {}", i, receive_times.len());
             match rproto.read_response(&socket2, &mut buf) {
                 Ok((mut idx, tsc)) => {
-                    let server_port = (idx >> 32) as u16;
-                    let queue_len = (idx & 0xffff_ffff) as u32;
+                    let stats = idx;
+                    let server_port = (stats >> 48) as u16;
+                    let conn_count = ((stats >> 32) & 0xffff) as u16;
+                    let queue_len = (stats & 0xffff_ffff) as u32;
+
                     if use_ordering {
                         idx = i;
                     }
                     // eprintln!("receive");
-                    receive_times[idx] = Some((Instant::now(), tsc, server_port, src_addr.port(), queue_len));
+                    receive_times[idx] = Some((Instant::now(), tsc, server_port, src_addr.port(), queue_len, conn_count));
                     recv_cnt += 1;
                     received_packets2.store(recv_cnt, Ordering::SeqCst)
                 }
@@ -1011,12 +1017,13 @@ fn run_client_worker(
                 .filter(|p| !proto.uses_ordered_requests() || p.actual_start.is_some()),
         )
         .for_each(|(c, p)| {
-            if let Some((inst, tsc, server_port, client_port, queue_len)) = c {
+            if let Some((inst, tsc, server_port, client_port, queue_len, conn_count)) = c {
                 (*p).completion_time = Some(inst - start);
                 (*p).completion_server_tsc = Some(tsc);
                 (*p).server_port = Some(server_port);
                 (*p).client_port = Some(client_port);
                 (*p).queue_len = Some(queue_len);
+                (*p).conn_count = Some(conn_count);
             }
         });
 
@@ -1583,15 +1590,15 @@ fn zipf_process_result_final(
                                                 .open(&lat_file_path)
                                                 .expect("Failed to open file");
                 
-                // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
-                let recvq_file_path = format!("{}.recv_qlen", exptid);
-                let mut recvq_file = OpenOptions::new()
-                                                .append(true)
-                                                .create(true)
-                                                .open(&recvq_file_path)
-                                                .expect("Failed to open file");
-                // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
-
+                #[cfg(feature = "recv-queue-eval")]
+                let mut recvq_file = {
+                    let recvq_file_path = format!("{}.recv_qlen", exptid);
+                    OpenOptions::new()
+                        .append(true)
+                        .create(true)
+                        .open(&recvq_file_path)
+                        .expect("Failed to open file")
+                };
 
                 for p in results.into_iter().filter_map(|p| p.trace).kmerge() {
                     
@@ -1601,14 +1608,15 @@ fn zipf_process_result_final(
                         // unsafe{ LATENCY_TRACE_RESULTS.push((duration_to_ns(actual_start), lat)) };
                         writeln!(lat_file, "{},{},{}", target_start, lat_in_us, p.client_port.unwrap()).expect("Failed to write to lat_file");
                         
-                        
-                        // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
-                        let tsc = p.server_tsc;
-                        let server_port = p.server_port.unwrap();
-                        let recv_qlen = p.queue_len.unwrap();
-                        
-                        writeln!(recvq_file, "{},{},{},{},{}", target_start, lat_in_us, recv_qlen, server_port, tsc).expect("Failed to write to recvq_file");
-                        // UNCOMMENT FOR RECV QUEUE LENGTH EVAL.
+                        #[cfg(feature = "recv-queue-eval")]
+                        {
+                            let tsc = p.server_tsc;
+                            let server_port = p.server_port.unwrap();
+                            let recv_qlen = p.queue_len.unwrap();
+                            let conn_count = p.conn_count.unwrap();
+                            
+                            writeln!(recvq_file, "{target_start},{lat_in_us},{recv_qlen},{server_port},{conn_count},{tsc}").expect("Failed to write to recvq_file");
+                        }
                     }
                 }
             }
