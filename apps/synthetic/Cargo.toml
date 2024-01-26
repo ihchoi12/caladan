@@ -25,5 +25,6 @@ panic = "abort"
 
 [features]
 recv-queue-eval = [ ]
+split-requests = [ ]
 
 [workspace]

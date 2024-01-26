@@ -970,6 +970,28 @@ fn run_client_worker(
 
         // packet.actual_start = Some(packet.target_start);
         packet.actual_start = Some(start.elapsed());
+
+        #[cfg(feature = "split-requests")]
+        {
+            if let Err(e) = (&*socket).write_all(&payload[..20]) {
+                packet.actual_start = None;
+                match e.raw_os_error() {
+                    Some(-32) | Some(-103) | Some(-104) => {}
+                    _ => println!("Send thread ({}/{}): {}", i, packets.len(), e),
+                }
+                break;
+            }
+            if let Err(e) = (&*socket).write_all(&payload[20..]) {
+                packet.actual_start = None;
+                match e.raw_os_error() {
+                    Some(-32) | Some(-103) | Some(-104) => {}
+                    _ => println!("Send thread ({}/{}): {}", i, packets.len(), e),
+                }
+                break;
+            }
+        }
+
+        #[cfg(not(feature = "split-requests"))]
         if let Err(e) = (&*socket).write_all(&payload[..]) {
             packet.actual_start = None;
             match e.raw_os_error() {
