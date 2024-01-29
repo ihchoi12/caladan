@@ -25,5 +25,6 @@ panic = "abort"
 
 [features]
 server-reply-analysis = [ ]
+split-requests = [ ]
 
 [workspace]
