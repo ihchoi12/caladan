@@ -164,7 +164,7 @@ impl LoadgenProtocol for HttpProtocol {
     fn read_response(&self, mut sock: &Connection, buf: &mut Buffer) -> io::Result<(usize, u64)> {
         let mut pstate = ParseState::new();
 
-        #[cfg(feature = "recv-queue-eval")]
+        #[cfg(feature = "server-reply-analysis")]
         let (stats, nanos) = {
             while buf.data_size() < 16 {
                 buf.try_shrink()?;
@@ -225,9 +225,9 @@ impl LoadgenProtocol for HttpProtocol {
                 }
             }
 
-            #[cfg(feature = "recv-queue-eval")]
+            #[cfg(feature = "server-reply-analysis")]
             return Ok((stats, nanos));
-            #[cfg(not(feature = "recv-queue-eval"))]
+            #[cfg(not(feature = "server-reply-analysis"))]
             return Ok((0, 0));
         }
     }

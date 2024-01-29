@@ -360,7 +360,7 @@ impl PartialEq for TraceResult {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default, PartialEq)]
 struct ScheduleResult {
     packet_count: usize,
     drop_count: usize,
@@ -591,14 +591,14 @@ fn process_result_final(
                     eprintln!("Failed to create file {}.latency", exptid);
                 }
 
-                if let Ok(mut file) = File::create(format!("{}.latency_raw", exptid)) {
-                    for (index, latency) in latencies_raw.iter().enumerate() {
-                        writeln!(file, "{},{}", index, latency)
-                            .expect("Failed to write to file");
-                    }
-                } else {
-                    eprintln!("Failed to create file {}..latency_raw", exptid);
-                }
+                // if let Ok(mut file) = File::create(format!("{}.latency_raw", exptid)) {
+                //     for (index, latency) in latencies_raw.iter().enumerate() {
+                //         writeln!(file, "{},{}", index, latency)
+                //             .expect("Failed to write to file");
+                //     }
+                // } else {
+                //     eprintln!("Failed to create file {}..latency_raw", exptid);
+                // }
             }
         }
     }
@@ -615,13 +615,13 @@ fn process_result_final(
                                                 .open(&lat_file_path)
                                                 .expect("Failed to open file");
                 
-                #[cfg(feature = "recv-queue-eval")]
-                let mut recvq_file = {
-                    let recvq_file_path = format!("{}.recv_qlen", exptid);
+                #[cfg(feature = "server-reply-analysis")]
+                let mut server_reply_file = {
+                    let server_reply_file_path = format!("{}.server_reply", exptid);
                     OpenOptions::new()
                         .append(true)
                         .create(true)
-                        .open(&recvq_file_path)
+                        .open(&server_reply_file_path)
                         .expect("Failed to open file")
                 };
 
@@ -632,14 +632,14 @@ fn process_result_final(
                         // unsafe{ LATENCY_TRACE_RESULTS.push((duration_to_ns(actual_start), lat)) };
                         writeln!(lat_file, "{},{},{}", target_start, lat_in_us, p.client_port.unwrap()).expect("Failed to write to lat_file");
                         
-                        #[cfg(feature = "recv-queue-eval")]
+                        #[cfg(feature = "server-reply-analysis")]
                         {
                             let tsc = p.server_tsc;
                             let server_port = p.server_port.unwrap();
                             let recv_qlen = p.queue_len.unwrap();
                             let conn_count = p.conn_count.unwrap();
                             
-                            writeln!(recvq_file, "{target_start},{lat_in_us},{recv_qlen},{server_port},{conn_count},{tsc}").expect("Failed to write to recvq_file");
+                            writeln!(server_reply_file, "{target_start},{tsc},{server_port},{lat_in_us},{recv_qlen},{conn_count}").expect("Failed to write to server_reply_file");
                         }
                     }
                 }
@@ -739,8 +739,14 @@ fn lognormal_interarrival(rand_gaussian: f64) -> f64 {
     lognormal(6.2726064589176, 1.8779582422664103, rand_gaussian)/10.0
 }
 
-fn lognormal_onoff(rand_gaussian: f64) -> f64 {
+fn lognormal_on(rand_gaussian: f64) -> f64 {
+    // lognormal(5.0, 0.5, rand_gaussian)
     lognormal(2.868183746231741, 0.4301567266932548, rand_gaussian)
+}
+
+fn lognormal_off(rand_gaussian: f64) -> f64 {
+    // lognormal(5.0, 0.5, rand_gaussian)
+    lognormal(1.0872546045494296, 0.38168878514903204, rand_gaussian)
 }
 /* unit: microseconds */
 
@@ -770,21 +776,29 @@ fn gen_packets_for_schedule(schedules: &Arc<Vec<RequestSchedule>>, seed: u64) ->
             let mu = 0.0;
             let sigma = 1.0;
             let normal = Normal::new(mu, sigma).unwrap();    
-            
+            let mut is_on = true;
+
             let mut onoff_timestamp = last;
             for sched in schedules.iter() {
                 // eprintln!("{}, {:?}", seed, sched.arrival);
-                let mut is_on = true;
+                // let mut is_on = true;
                 end += duration_to_ns(sched.runtime);
 
                 let mut onoff_intervals: Vec<(bool, (u64, u64))> = Vec::new();
                 let mut total_on_time: u64 = 0;
                 loop{
                     let rand_gaussian = normal.sample(&mut important_rand);
-                    let interval_in_ns = std::cmp::min( (lognormal_onoff(rand_gaussian) * 1000000.0) as u64, end - onoff_timestamp );
-                    if onoff_timestamp + interval_in_ns == end {
-                        is_on = true;
-                    }
+                    let interval_in_ns = match is_on{
+                        // true => std::cmp::min( (lognormal_on(rand_gaussian) * 1000000.0) as u64, end - onoff_timestamp ),
+                        // false => std::cmp::min( (lognormal_off(rand_gaussian) * 1000000.0) as u64, end - onoff_timestamp ),
+                        true => (lognormal_on(rand_gaussian) * 1000.0) as u64,
+                        false => (lognormal_off(rand_gaussian) * 1000.0) as u64,
+                    };
+                    // eprintln!("{:?}, {}", is_on, interval_in_ns);
+                    
+                    // if onoff_timestamp + interval_in_ns == end {
+                    //     is_on = true;
+                    // }
                     onoff_intervals.push((is_on, (onoff_timestamp, onoff_timestamp + interval_in_ns)));
                     // eprintln!("{}, {}, {}, {}, {}", seed, is_on, onoff_timestamp, interval_in_ns, end);
                     onoff_timestamp = onoff_timestamp + interval_in_ns;
@@ -793,7 +807,7 @@ fn gen_packets_for_schedule(schedules: &Arc<Vec<RequestSchedule>>, seed: u64) ->
                         total_on_time = total_on_time + interval_in_ns;
                     }
                     is_on = !is_on;
-                    if onoff_timestamp == end {
+                    if onoff_timestamp >= end {
                         break;
                     }
                 }
@@ -1314,7 +1328,7 @@ fn get_zipf_distribution(
     */
 
     static mut COUNTER: u64 = 0;
-    unsafe{ COUNTER += 1; }
+    unsafe{ COUNTER += 34752; }
     let c = (1..nthreads + 1)
         .fold(0.0, |acc, i| acc + (i as f64).powf(alpha).recip())
         .recip();
@@ -1461,11 +1475,13 @@ fn zipf_process_result_final(
     }
 
     results.iter().for_each(|res| {
-        for (k, v) in &res.latencies {
-            *buckets.entry(*k).or_insert(0) += v;
-        }
-        for lat in &res.latencies_raw {
-            latencies_raw.push(*lat);
+        if *res != Default::default() {
+            for (k, v) in &res.latencies {
+                *buckets.entry(*k).or_insert(0) += v;
+            }
+            for lat in &res.latencies_raw {
+                latencies_raw.push(*lat);
+            }
         }
     });
 
@@ -1500,12 +1516,20 @@ fn zipf_process_result_final(
     let start_unix = wct_start + first_send;
 
     let target = results.iter().map(|res| {
-        (res.packet_count + res.drop_count) as u64 * 1000_000_000
-            / duration_to_ns(res.last_send.unwrap() - res.first_send.unwrap())
+        if *res == Default::default() {
+            0
+        } else {
+            (res.packet_count + res.drop_count) as u64 * 1000_000_000
+                / duration_to_ns(res.last_send.unwrap() - res.first_send.unwrap())
+        }
     }).fold(0, |s, e| s + e);
 
     let actual = results.iter().map(|res| {
-        res.packet_count as u64 * 1000_000_000 / duration_to_ns(res.last_recv.unwrap() - res.first_send.unwrap())
+        if *res == Default::default() {
+            0
+        } else {
+            res.packet_count as u64 * 1000_000_000 / duration_to_ns(res.last_recv.unwrap() - res.first_send.unwrap())
+        }
     }).fold(0, |s, e| s + e);
 
     println!(
@@ -1590,13 +1614,13 @@ fn zipf_process_result_final(
                                                 .open(&lat_file_path)
                                                 .expect("Failed to open file");
                 
-                #[cfg(feature = "recv-queue-eval")]
-                let mut recvq_file = {
-                    let recvq_file_path = format!("{}.recv_qlen", exptid);
+                #[cfg(feature = "server-reply-analysis")]
+                let mut server_reply_file = {
+                    let server_reply_file_path = format!("{}.server_reply", exptid);
                     OpenOptions::new()
                         .append(true)
                         .create(true)
-                        .open(&recvq_file_path)
+                        .open(&server_reply_file_path)
                         .expect("Failed to open file")
                 };
 
@@ -1608,14 +1632,14 @@ fn zipf_process_result_final(
                         // unsafe{ LATENCY_TRACE_RESULTS.push((duration_to_ns(actual_start), lat)) };
                         writeln!(lat_file, "{},{},{}", target_start, lat_in_us, p.client_port.unwrap()).expect("Failed to write to lat_file");
                         
-                        #[cfg(feature = "recv-queue-eval")]
+                        #[cfg(feature = "server-reply-analysis")]
                         {
                             let tsc = p.server_tsc;
                             let server_port = p.server_port.unwrap();
                             let recv_qlen = p.queue_len.unwrap();
                             let conn_count = p.conn_count.unwrap();
                             
-                            writeln!(recvq_file, "{target_start},{lat_in_us},{recv_qlen},{server_port},{conn_count},{tsc}").expect("Failed to write to recvq_file");
+                            writeln!(server_reply_file, "{target_start},{tsc},{server_port},{lat_in_us},{recv_qlen},{conn_count}").expect("Failed to write to server_reply_file");
                         }
                     }
                 }
@@ -1690,7 +1714,7 @@ fn zipf_run_client(
                     let old_sched_start = sched_start;
                     sched_start += sched.runtime;
                     if let OutputMode::Silent = sched.output { None }
-                    else { Some((*sched, packet.expect("thread had zero results"), old_sched_start)) }
+                    else { Some((*sched, packet.unwrap_or_default(), old_sched_start)) }
                 })
                 .collect_vec()
         })
