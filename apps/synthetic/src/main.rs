@@ -16,6 +16,8 @@ extern crate test;
 extern crate arrayvec;
 
 use arrayvec::ArrayVec;
+use libc::exit;
+use rand_distr::num_traits::ToPrimitive;
 
 use std::collections::{BTreeMap, HashMap};
 use std::f32::INFINITY;
@@ -884,8 +886,8 @@ fn run_client_worker(
     live_mode_socket: Option<Arc<Connection>>,
 ) -> Vec<Option<ScheduleResult>> {
     let mut payload = Vec::with_capacity(4096);
-    let (mut packets, sched_boundaries) = gen_packets_for_schedule(&schedules, 100 + index as u64);
-    let src_addr = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), (100 + index) as u16);
+    let (mut packets, sched_boundaries) = gen_packets_for_schedule(&schedules, index as u64);
+    let src_addr = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), (index) as u16);
     let live_mode = live_mode_socket.is_some();
     let socket = match live_mode_socket {
         Some(sock) => sock,
@@ -1349,15 +1351,15 @@ fn get_zipf_distribution(
         return zipf
     */
 
-    static mut COUNTER: u64 = 0;
-    unsafe{ COUNTER += 34752; }
+    // static mut COUNTER: u64 = 0;
+    // unsafe{ COUNTER += 34752; }
     let c = (1..nthreads + 1)
         .fold(0.0, |acc, i| acc + (i as f64).powf(alpha).recip())
         .recip();
 
     let mut range: Vec<_> = (1..=nthreads).collect();
     
-    range.shuffle(&mut StdRng::seed_from_u64(unsafe{ COUNTER }));
+    // range.shuffle(&mut StdRng::seed_from_u64(unsafe{ COUNTER }));
     // eprintln!("{:?}", range);
     range.into_iter().map(move |i| (total_pps as f64 * (c / (i as f64).powf(alpha))))
 }
@@ -1438,7 +1440,7 @@ fn zipf_gen_loadshift_experiment(
                     .enumerate()
                     .for_each(|(i, pps)| {
                         let ns_per_packet = 1_000_000_000.0 / pps;
-                        // eprint!("{}    ", pps as usize);
+                        eprint!("{}    ", pps as usize);
                         acc[i].push(
                             RequestSchedule {
                                 // arrival: Distribution::Constant(ns_per_packet as u64),
@@ -1454,6 +1456,80 @@ fn zipf_gen_loadshift_experiment(
                 (acc, ppss)
             }
         )
+}
+
+fn zipf_gen_per_server_loadshift_experiment(
+    spec: &str,
+    service: Distribution,
+    nthreads: usize,
+    alpha: f64,
+    output: OutputMode,
+    num_servers: usize,
+) -> Vec<Vec<RequestSchedule>> {
+    
+    let num_conns_per_server = nthreads/num_servers;
+
+    let mut schedules: Vec<Vec<RequestSchedule>> = vec![vec![]; nthreads];
+    for (server_idx, per_server_step_spec) in spec.split("/").enumerate(){
+        // eprintln!("server_idx: {}, per_server_step_spec: {}", server_idx, per_server_step_spec);    
+        for (step_idx, step_spec) in per_server_step_spec.split(",").enumerate(){
+            // eprintln!("* step_idx: {}, step_spec: {}", step_idx, step_spec);    
+            let s: Vec<&str> = step_spec.split(":").collect();
+            assert!(s.len() == 2);
+            
+            let pps_range: Vec<&str> = s[0].split("-").collect();
+            let micros: u64 = s[1].parse().unwrap();
+            
+            let (pps_start, pps_end): (i64, i64) = match pps_range.len() {
+                2 => (pps_range[0].parse().unwrap(), pps_range[1].parse().unwrap()),
+                _ => (pps_range[0].parse().unwrap(), pps_range[0].parse().unwrap()),
+            };
+
+            if pps_start == pps_end {
+                get_zipf_distribution(pps_start as usize, alpha, num_conns_per_server)
+                    .enumerate()
+                    .for_each(|(conn_idx, pps)| {
+                        let ns_per_packet = 1_000_000_000.0 / pps;
+                        // eprint!("{}    ", pps as usize);
+                        schedules[conn_idx * num_servers + server_idx].push(
+                            RequestSchedule {
+                                // arrival: Distribution::Constant(ns_per_packet as u64),
+                                arrival: Distribution::Exponential(ns_per_packet as f64),
+                                service,
+                                output,
+                                runtime: Duration::from_micros(micros),
+                                rps: pps as usize,
+                                discard_pct: 0.0,
+                            }
+                        );
+                    });
+            }else {
+                let pps_interval = (pps_end - pps_start) / (micros.to_i64().unwrap()/1000);
+                for t in 1..(micros/1000 + 1) { /* Ramp up in 1ms increments */
+                    let pps_step = pps_start + (pps_interval * t.to_i64().unwrap());
+                    eprintln!("pps_step: {}", pps_step);
+                    get_zipf_distribution(pps_step as usize, alpha, num_conns_per_server)
+                        .enumerate()
+                        .for_each(|(conn_idx, pps)| {
+                            let ns_per_packet = 1_000_000_000.0 / pps;
+                            // eprint!("{}    ", pps as usize);
+                            schedules[conn_idx * num_servers + server_idx].push(
+                                RequestSchedule {
+                                    // arrival: Distribution::Constant(ns_per_packet as u64),
+                                    arrival: Distribution::Exponential(ns_per_packet as f64),
+                                    service,
+                                    output,
+                                    runtime: Duration::from_millis(1),
+                                    rps: pps as usize,
+                                    discard_pct: 0.0,
+                                }
+                            );
+                        });
+                }
+            }
+        }
+    }
+    schedules
 }
 
 fn zipf_process_result_final(
@@ -1671,6 +1747,112 @@ fn zipf_process_result_final(
 
     true
 }
+
+fn zipf_process_result_final_per_server(
+    results: Vec<ScheduleResult>,
+) -> bool {
+    println!("\n\n[RESULT] Writing data into files...");
+    if let Some(exptid) = unsafe {&EXPTID} {
+        if exptid != "null" {
+            
+            let lat_file_path = format!("{}.latency_trace", exptid);
+            let mut lat_file = OpenOptions::new()
+                                            .append(true)
+                                            .create(true)
+                                            .open(&lat_file_path)
+                                            .expect("Failed to open file");
+            
+            #[cfg(feature = "server-reply-analysis")]
+            let mut server_reply_file = {
+                let server_reply_file_path = format!("{}.server_reply", exptid);
+                OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(&server_reply_file_path)
+                    .expect("Failed to open file")
+            };
+
+            for p in results.into_iter().filter_map(|p| p.trace).kmerge() {
+                
+                if let Some(completion_time) = p.completion_time {
+                    let target_start = duration_to_ns(p.target_start);
+                    let lat_in_us = duration_to_ns(completion_time - p.actual_start.unwrap()) as u64 / 1000;
+                    // unsafe{ LATENCY_TRACE_RESULTS.push((duration_to_ns(actual_start), lat)) };
+                    writeln!(lat_file, "{},{},{}", target_start, lat_in_us, p.client_port.unwrap()).expect("Failed to write to lat_file");
+                    
+                    #[cfg(feature = "server-reply-analysis")]
+                    {
+                        let tsc = p.server_tsc;
+                        let server_port = p.server_port.unwrap();
+                        let recv_qlen = p.queue_len.unwrap();
+                        let conn_count = p.conn_count.unwrap();
+                        
+                        writeln!(server_reply_file, "{target_start},{tsc},{server_port},{lat_in_us},{recv_qlen},{conn_count}").expect("Failed to write to server_reply_file");
+                    }
+                }
+            }
+        }
+    }
+    
+
+    true
+}
+
+fn zipf_run_client_per_server(
+    proto: Arc<Box<dyn LoadgenProtocol>>,
+    backend: Backend,
+    addrs: &Vec<SocketAddrV4>,
+    nthreads: usize,
+    tport: Transport,
+    barrier_group: &mut Option<lockstep::Group>,
+    schedules: Vec<Arc<Vec<RequestSchedule>>>,
+    index: usize,
+    num_servers: usize,
+) {
+    let wg = shenango::WaitGroup::new();
+
+    wg.add(3 * nthreads as i32);
+    let wg_start = shenango::WaitGroup::new();
+    wg_start.add(1 as i32);
+
+    let conn_threads: Vec<_> = schedules
+        .iter()
+        .enumerate()
+        .map(|(i, schedules)| {
+            let client_idx = num_servers * (100 + (index * nthreads)) + i;
+            let proto: Arc<Box<dyn LoadgenProtocol>> = proto.clone();
+            let wg = wg.clone();
+            let wg_start = wg_start.clone();
+            let schedules = schedules.clone();
+            let addr = addrs[i % addrs.len()];
+
+            backend.spawn_thread(move || {
+                run_client_worker(
+                    proto, backend, addr, tport, wg, wg_start, schedules, client_idx, None,
+                )
+            })
+        })
+        .collect();
+    backend.sleep(Duration::from_secs(1));
+    wg.wait();
+
+    if let Some(ref mut g) = *barrier_group {
+        g.barrier();
+    }
+
+    wg_start.done();
+    let packets: Vec<Vec<Option<ScheduleResult>>> = conn_threads
+        .into_iter()
+        .map(|s| s.join().unwrap())
+        .collect();
+
+    let results: Vec<ScheduleResult> = packets.into_iter()
+        .flatten() // Flatten the Vec<Vec<Option<ScheduleResult>>> to Vec<Option<ScheduleResult>>
+        .map(|packet| packet.unwrap_or_default()) // Convert Option<ScheduleResult> to ScheduleResult
+        .collect(); // Collect into Vec<ScheduleResult>
+    zipf_process_result_final_per_server(results);
+}
+
 
 fn zipf_run_client(
     total_ppss: Vec<usize>,
@@ -2319,16 +2501,24 @@ fn main() {
 
                 if !loadshift_spec.is_empty() {
                     if let Some(alpha) = zipf { 
-                        let (mut schedules, ppss) = zipf_gen_loadshift_experiment(&loadshift_spec, distribution, nthreads, alpha, output);
+                        // let (mut schedules, ppss) = zipf_gen_loadshift_experiment(&loadshift_spec, distribution, nthreads, alpha, output);
                         // for schedule_vec in &schedules {
                         //     for schedule in schedule_vec {
                         //         eprintln!("{:?}", schedule.arrival);
                         //     }
                         //     eprint!("\n\n");
                         // }
+                        let num_servers = loadshift_spec.as_str().matches('/').count() + 1;
+                        assert!(nthreads % num_servers == 0);
+                        let mut schedules = zipf_gen_per_server_loadshift_experiment(&loadshift_spec, distribution, nthreads, alpha, output, num_servers);
+                        for schedule_vec in &schedules {
+                            for schedule in schedule_vec {
+                                eprintln!("{:?}, {:?}", schedule.rps, schedule.runtime);
+                            }
+                            eprint!("\n\n");
+                        }
                         let schedules = schedules.into_iter().map(|e| Arc::new(e)).collect();
-                        zipf_run_client(
-                            ppss,
+                        zipf_run_client_per_server(
                             proto,
                             backend,
                             &addrs,
@@ -2336,7 +2526,8 @@ fn main() {
                             tport,
                             &mut barrier_group,
                             schedules,
-                            1
+                            1,
+                            num_servers,
                         );
                     } else {
                         let sched = gen_loadshift_experiment(&loadshift_spec, distribution, nthreads, output);
