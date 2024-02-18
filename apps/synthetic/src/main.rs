@@ -630,9 +630,10 @@ fn process_result_final(
                 for p in results.into_iter().filter_map(|p| p.trace).kmerge() {
                     if let Some(completion_time) = p.completion_time {
                         let target_start = duration_to_ns(p.target_start);
+                        let actual_start = duration_to_ns(p.actual_start.unwrap());
                         let lat_in_us = duration_to_ns(completion_time - p.actual_start.unwrap()) as u64 / 1000;
                         // unsafe{ LATENCY_TRACE_RESULTS.push((duration_to_ns(actual_start), lat)) };
-                        writeln!(lat_file, "{},{},{}", target_start, lat_in_us, p.client_port.unwrap()).expect("Failed to write to lat_file");
+                        writeln!(lat_file, "{},{},{}", actual_start, lat_in_us, p.client_port.unwrap()).expect("Failed to write to lat_file");
                         
                         #[cfg(feature = "server-reply-analysis")]
                         {
@@ -641,7 +642,7 @@ fn process_result_final(
                             let recv_qlen = p.queue_len.unwrap();
                             let conn_count = p.conn_count.unwrap();
                             
-                            writeln!(server_reply_file, "{target_start},{tsc},{server_port},{lat_in_us},{recv_qlen},{conn_count}").expect("Failed to write to server_reply_file");
+                            writeln!(server_reply_file, "{actual_start},{tsc},{server_port},{lat_in_us},{recv_qlen},{conn_count}").expect("Failed to write to server_reply_file");
                         }
                     }
                 }
@@ -852,7 +853,10 @@ fn gen_packets_for_schedule(schedules: &Arc<Vec<RequestSchedule>>, seed: u64) ->
                 end += duration_to_ns(sched.runtime);
                 
                 loop {
-                    // eprintln!("{}, {}", seed, last);
+                    // eprintln!("{}", last);
+                    if last >= end {
+                        break;
+                    }
                     packets.push(Packet {
                         randomness: rng.gen::<u64>(),
                         target_start: Duration::from_nanos(last),
@@ -1726,9 +1730,10 @@ fn zipf_process_result_final(
                     
                     if let Some(completion_time) = p.completion_time {
                         let target_start = duration_to_ns(p.target_start);
+                        let actual_start = duration_to_ns(p.actual_start.unwrap());
                         let lat_in_us = duration_to_ns(completion_time - p.actual_start.unwrap()) as u64 / 1000;
                         // unsafe{ LATENCY_TRACE_RESULTS.push((duration_to_ns(actual_start), lat)) };
-                        writeln!(lat_file, "{},{},{}", target_start, lat_in_us, p.client_port.unwrap()).expect("Failed to write to lat_file");
+                        writeln!(lat_file, "{},{},{}", actual_start, lat_in_us, p.client_port.unwrap()).expect("Failed to write to lat_file");
                         
                         #[cfg(feature = "server-reply-analysis")]
                         {
@@ -1737,7 +1742,7 @@ fn zipf_process_result_final(
                             let recv_qlen = p.queue_len.unwrap();
                             let conn_count = p.conn_count.unwrap();
                             
-                            writeln!(server_reply_file, "{target_start},{tsc},{server_port},{lat_in_us},{recv_qlen},{conn_count}").expect("Failed to write to server_reply_file");
+                            writeln!(server_reply_file, "{actual_start},{tsc},{server_port},{lat_in_us},{recv_qlen},{conn_count}").expect("Failed to write to server_reply_file");
                         }
                     }
                 }
@@ -1776,9 +1781,10 @@ fn zipf_process_result_final_per_server(
                 
                 if let Some(completion_time) = p.completion_time {
                     let target_start = duration_to_ns(p.target_start);
+                    let actual_start = duration_to_ns(p.actual_start.unwrap());
                     let lat_in_us = duration_to_ns(completion_time - p.actual_start.unwrap()) as u64 / 1000;
                     // unsafe{ LATENCY_TRACE_RESULTS.push((duration_to_ns(actual_start), lat)) };
-                    writeln!(lat_file, "{},{},{}", target_start, lat_in_us, p.client_port.unwrap()).expect("Failed to write to lat_file");
+                    writeln!(lat_file, "{},{},{}", actual_start, lat_in_us, p.client_port.unwrap()).expect("Failed to write to lat_file");
                     
                     #[cfg(feature = "server-reply-analysis")]
                     {
@@ -1787,7 +1793,7 @@ fn zipf_process_result_final_per_server(
                         let recv_qlen = p.queue_len.unwrap();
                         let conn_count = p.conn_count.unwrap();
                         
-                        writeln!(server_reply_file, "{target_start},{tsc},{server_port},{lat_in_us},{recv_qlen},{conn_count}").expect("Failed to write to server_reply_file");
+                        writeln!(server_reply_file, "{actual_start},{tsc},{server_port},{lat_in_us},{recv_qlen},{conn_count}").expect("Failed to write to server_reply_file");
                     }
                 }
             }
