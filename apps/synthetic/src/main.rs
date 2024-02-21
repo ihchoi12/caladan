@@ -55,10 +55,8 @@ pub struct Packet {
     completion_time_ns: AtomicU64,
     completion_server_tsc: Option<u64>,
     completion_time: Option<Duration>,
-    server_port: Option<u16>,
     client_port: Option<u16>,
-    queue_len: Option<u32>,
-    conn_count: Option<u16>,
+    server_metadata: Option<ServerMetadata>,
 }
 
 mod fakework;
@@ -161,10 +159,21 @@ impl<'a> Buffer<'a> {
     }
 }
 
+#[derive(Clone, Copy)]
+pub struct ServerMetadata {
+    timestamp: u64,
+    server_port: u16,
+    queue_len: u16,
+    conn_count: u16,
+    response_time_delta: u32,
+}
+
 trait LoadgenProtocol: Send + Sync {
     fn gen_req(&self, i: usize, p: &Packet, buf: &mut Vec<u8>);
     fn uses_ordered_requests(&self) -> bool;
     fn read_response(&self, sock: &Connection, scratch: &mut Buffer) -> io::Result<(usize, u64)>;
+
+    fn as_http(&self) -> Option<&HttpProtocol> { None }
 }
 
 arg_enum! {
@@ -344,10 +353,8 @@ struct TraceResult {
     target_start: Duration,
     completion_time: Option<Duration>,
     server_tsc: u64,
-    server_port: Option<u16>,
     client_port: Option<u16>,
-    queue_len: Option<u32>,
-    conn_count: Option<u16>,
+    server_metadata: Option<ServerMetadata>,
 }
 
 impl PartialOrd for TraceResult {
@@ -637,12 +644,9 @@ fn process_result_final(
                         
                         #[cfg(feature = "server-reply-analysis")]
                         {
-                            let tsc = p.server_tsc;
-                            let server_port = p.server_port.unwrap();
-                            let recv_qlen = p.queue_len.unwrap();
-                            let conn_count = p.conn_count.unwrap();
+                            let ServerMetadata { timestamp, server_port, queue_len, conn_count, response_time_delta } = p.server_metadata.unwrap();
                             
-                            writeln!(server_reply_file, "{actual_start},{tsc},{server_port},{lat_in_us},{recv_qlen},{conn_count}").expect("Failed to write to server_reply_file");
+                            writeln!(server_reply_file, "{actual_start},{timestamp},{server_port},{lat_in_us},{queue_len},{conn_count}").expect("Failed to write to server_reply_file");
                         }
                     }
                 }
@@ -711,10 +715,8 @@ fn process_result(sched: &RequestSchedule, packets: &mut [Packet]) -> Option<Sch
                         target_start: p.target_start,
                         completion_time: p.completion_time,
                         server_tsc: p.completion_server_tsc.unwrap(),
-                        server_port: p.server_port,
                         client_port: p.client_port,
-                        queue_len: p.queue_len,
-                        conn_count: p.conn_count,
+                        server_metadata: p.server_metadata,
                     })
                 })
                 .collect();
@@ -911,25 +913,29 @@ fn run_client_worker(
     let receive_thread = backend.spawn_thread(move || {
         let mut recv_buf = vec![0; 4096];
         // (Instant, tsc, server port, client port, queue len, conn count)
-        let mut receive_times: Vec<Option<(Instant, u64, u16, u16, u32, u16)>> = vec![None; packets_per_thread];
+        // let mut receive_times: Vec<Option<(Instant, u64, u16, u16, u32, u16)>> = vec![None; packets_per_thread];
+        // (Instant, client port, server metadata)
+        let mut receive_times: Vec<Option<(Instant, u16, Option<ServerMetadata>)>> = vec![None; packets_per_thread];
         let mut buf = Buffer::new(&mut recv_buf);
         let use_ordering = rproto.uses_ordered_requests();
         wg2.done();
         let mut recv_cnt = 0;
         for i in 0..receive_times.len() {
             // eprintln!("{} {}", i, receive_times.len());
-            match rproto.read_response(&socket2, &mut buf) {
-                Ok((mut idx, tsc)) => {
-                    let stats = idx;
-                    let server_port = (stats >> 48) as u16;
-                    let conn_count = ((stats >> 32) & 0xffff) as u16;
-                    let queue_len = (stats & 0xffff_ffff) as u32;
+            let mut server_metadata = None;
 
+            let response = match rproto.as_http() {
+                Some(http) => http.read_response_with_metadata(&socket2, &mut buf, &mut server_metadata),
+                None => rproto.read_response(&socket2, &mut buf),
+            };
+
+            match response {
+                Ok((mut idx, _tsc)) => {
                     if use_ordering {
                         idx = i;
                     }
                     // eprintln!("receive");
-                    receive_times[idx] = Some((Instant::now(), tsc, server_port, src_addr.port(), queue_len, conn_count));
+                    receive_times[idx] = Some((Instant::now(), src_addr.port(), server_metadata));
                     recv_cnt += 1;
                     received_packets2.store(recv_cnt, Ordering::SeqCst)
                 }
@@ -1059,13 +1065,11 @@ fn run_client_worker(
                 .filter(|p| !proto.uses_ordered_requests() || p.actual_start.is_some()),
         )
         .for_each(|(c, p)| {
-            if let Some((inst, tsc, server_port, client_port, queue_len, conn_count)) = c {
+            if let Some((inst, client_port, server_metadata)) = c {
                 (*p).completion_time = Some(inst - start);
-                (*p).completion_server_tsc = Some(tsc);
-                (*p).server_port = Some(server_port);
+                // (*p).completion_server_tsc = Some(server_metadata.timestamp);
                 (*p).client_port = Some(client_port);
-                (*p).queue_len = Some(queue_len);
-                (*p).conn_count = Some(conn_count);
+                (*p).server_metadata = server_metadata;
             }
         });
 
@@ -1736,13 +1740,9 @@ fn zipf_process_result_final(
                         writeln!(lat_file, "{},{},{}", actual_start, lat_in_us, p.client_port.unwrap()).expect("Failed to write to lat_file");
                         
                         #[cfg(feature = "server-reply-analysis")]
-                        {
-                            let tsc = p.server_tsc;
-                            let server_port = p.server_port.unwrap();
-                            let recv_qlen = p.queue_len.unwrap();
-                            let conn_count = p.conn_count.unwrap();
-                            
-                            writeln!(server_reply_file, "{actual_start},{tsc},{server_port},{lat_in_us},{recv_qlen},{conn_count}").expect("Failed to write to server_reply_file");
+                        {                            
+                            let ServerMetadata { timestamp, server_port, queue_len, conn_count, response_time_delta } = p.server_metadata.unwrap();
+                            writeln!(server_reply_file, "{actual_start},{timestamp},{server_port},{lat_in_us},{queue_len},{conn_count}").expect("Failed to write to server_reply_file");
                         }
                     }
                 }
@@ -1787,13 +1787,9 @@ fn zipf_process_result_final_per_server(
                     writeln!(lat_file, "{},{},{}", actual_start, lat_in_us, p.client_port.unwrap()).expect("Failed to write to lat_file");
                     
                     #[cfg(feature = "server-reply-analysis")]
-                    {
-                        let tsc = p.server_tsc;
-                        let server_port = p.server_port.unwrap();
-                        let recv_qlen = p.queue_len.unwrap();
-                        let conn_count = p.conn_count.unwrap();
-                        
-                        writeln!(server_reply_file, "{actual_start},{tsc},{server_port},{lat_in_us},{recv_qlen},{conn_count}").expect("Failed to write to server_reply_file");
+                    {                        
+                        let ServerMetadata { timestamp, server_port, queue_len, conn_count, response_time_delta } = p.server_metadata.unwrap();
+                        writeln!(server_reply_file, "{actual_start},{timestamp},{server_port},{lat_in_us},{queue_len},{conn_count}").expect("Failed to write to server_reply_file");
                     }
                 }
             }

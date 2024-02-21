@@ -1,7 +1,6 @@
 use clap::Arg;
 
 use std::cmp::min;
-use std::convert::TryInto;
 use std::io;
 use std::io::{Error, ErrorKind, Read};
 use std::net::SocketAddrV4;
@@ -12,6 +11,11 @@ use Connection;
 use LoadgenProtocol;
 use Packet;
 use Transport;
+
+use crate::ServerMetadata;
+
+#[cfg(feature = "server-reply-analysis")]
+use std::convert::TryInto;
 
 #[derive(Copy, Clone)]
 pub struct HttpProtocol {
@@ -164,22 +168,6 @@ impl LoadgenProtocol for HttpProtocol {
     fn read_response(&self, mut sock: &Connection, buf: &mut Buffer) -> io::Result<(usize, u64)> {
         let mut pstate = ParseState::new();
 
-        #[cfg(feature = "server-reply-analysis")]
-        let (stats, nanos) = {
-            while buf.data_size() < 16 {
-                buf.try_shrink()?;
-                let new_bytes = sock.read(buf.get_empty_buf())?;
-                if new_bytes == 0 {
-                    return Err(Error::new(ErrorKind::UnexpectedEof, "eof"));
-                }
-                buf.push_data(new_bytes);
-            }
-            let stats: usize = u64::from_be_bytes(buf.get_data()[0..8].try_into().unwrap()).try_into().expect("u64 to usize failed");
-            let nanos = u64::from_be_bytes(buf.get_data()[8..16].try_into().unwrap());
-            buf.pull_data(16);
-            (stats, nanos)
-        };
-
         if buf.data_size() == 0 {
             buf.try_shrink()?;
             let new_bytes = sock.read(buf.get_empty_buf())?;
@@ -225,10 +213,37 @@ impl LoadgenProtocol for HttpProtocol {
                 }
             }
 
-            #[cfg(feature = "server-reply-analysis")]
-            return Ok((stats, nanos));
-            #[cfg(not(feature = "server-reply-analysis"))]
             return Ok((0, 0));
         }
+    }
+
+    fn as_http(&self) -> Option<&HttpProtocol> {
+        Some(self)
+    }
+}
+
+impl HttpProtocol {
+    pub fn read_response_with_metadata(&self, mut sock: &Connection, buf: &mut Buffer, metadata: &mut Option<ServerMetadata>) -> io::Result<(usize, u64)> {
+        #[cfg(feature = "server-reply-analysis")]
+        {
+            while buf.data_size() < 16 {
+                buf.try_shrink()?;
+                let new_bytes = sock.read(buf.get_empty_buf())?;
+                if new_bytes == 0 {
+                    return Err(Error::new(ErrorKind::UnexpectedEof, "eof"));
+                }
+                buf.push_data(new_bytes);
+            }
+            let stats: usize = u64::from_be_bytes(buf.get_data()[0..8].try_into().unwrap()).try_into().expect("u64 to usize failed");
+            let server_port = (stats >> 48) as u16;
+            let conn_count = ((stats >> 32) & 0xffff) as u16;
+            let queue_len = (stats & 0xffff_ffff) as u16;
+            let timestamp = u64::from_be_bytes(buf.get_data()[8..16].try_into().unwrap());
+            buf.pull_data(16);
+
+            *metadata = Some(ServerMetadata { timestamp, server_port, queue_len, conn_count, response_time_delta: 0 })
+        }
+
+        self.read_response(sock, buf)
     }
 }
