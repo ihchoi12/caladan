@@ -237,7 +237,7 @@ impl HttpProtocol {
 
             let server_port = u16::from_be_bytes(buf.get_data()[0..2].try_into().unwrap());
             let conn_count = u16::from_be_bytes(buf.get_data()[2..4].try_into().unwrap());
-            let queue_len = u32::from_be_bytes(buf.get_data()[4..8].try_into().unwrap()) as u16;
+            let queue_len = u32::from_be_bytes(buf.get_data()[4..8].try_into().unwrap());
             let timestamp = u64::from_be_bytes(buf.get_data()[8..16].try_into().unwrap());
             buf.pull_data(16);
 

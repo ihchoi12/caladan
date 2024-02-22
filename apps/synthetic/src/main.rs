@@ -163,7 +163,7 @@ impl<'a> Buffer<'a> {
 pub struct ServerMetadata {
     timestamp: u64,
     server_port: u16,
-    queue_len: u16,
+    queue_len: u32,
     conn_count: u16,
     response_time_delta: u32,
 }
