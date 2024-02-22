@@ -226,7 +226,9 @@ impl HttpProtocol {
     pub fn read_response_with_metadata(&self, mut sock: &Connection, buf: &mut Buffer, metadata: &mut Option<ServerMetadata>) -> io::Result<(usize, u64)> {
         #[cfg(feature = "server-reply-analysis")]
         {
-            while buf.data_size() < 16 {
+            const METADATA_SIZE: usize = 20;
+
+            while buf.data_size() < METADATA_SIZE {
                 buf.try_shrink()?;
                 let new_bytes = sock.read(buf.get_empty_buf())?;
                 if new_bytes == 0 {
@@ -235,13 +237,15 @@ impl HttpProtocol {
                 buf.push_data(new_bytes);
             }
 
-            let server_port = u16::from_be_bytes(buf.get_data()[0..2].try_into().unwrap());
-            let conn_count = u16::from_be_bytes(buf.get_data()[2..4].try_into().unwrap());
-            let queue_len = u32::from_be_bytes(buf.get_data()[4..8].try_into().unwrap());
-            let timestamp = u64::from_be_bytes(buf.get_data()[8..16].try_into().unwrap());
-            buf.pull_data(16);
+            let data = buf.get_data();
+            let server_port = u16::from_be_bytes(data[0..2].try_into().unwrap());
+            let conn_count = u16::from_be_bytes(data[2..4].try_into().unwrap());
+            let queue_len = u32::from_be_bytes(data[4..8].try_into().unwrap());
+            let timestamp = u64::from_be_bytes(data[8..16].try_into().unwrap());
+            let response_time_delta = u32::from_be_bytes(data[16..20].try_into().unwrap());
+            buf.pull_data(METADATA_SIZE);
 
-            *metadata = Some(ServerMetadata { timestamp, server_port, queue_len, conn_count, response_time_delta: 0 })
+            *metadata = Some(ServerMetadata { timestamp, server_port, queue_len, conn_count, response_time_delta })
         }
 
         self.read_response(sock, buf)

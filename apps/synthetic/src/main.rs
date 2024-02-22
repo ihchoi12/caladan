@@ -646,7 +646,7 @@ fn process_result_final(
                         {
                             let ServerMetadata { timestamp, server_port, queue_len, conn_count, response_time_delta } = p.server_metadata.unwrap();
                             
-                            writeln!(server_reply_file, "{actual_start},{timestamp},{server_port},{lat_in_us},{queue_len},{conn_count}").expect("Failed to write to server_reply_file");
+                            writeln!(server_reply_file, "{actual_start},{timestamp},{server_port},{lat_in_us},{queue_len},{conn_count},{response_time_delta}").expect("Failed to write to server_reply_file");
                         }
                     }
                 }
@@ -1742,7 +1742,7 @@ fn zipf_process_result_final(
                         #[cfg(feature = "server-reply-analysis")]
                         {                            
                             let ServerMetadata { timestamp, server_port, queue_len, conn_count, response_time_delta } = p.server_metadata.unwrap();
-                            writeln!(server_reply_file, "{actual_start},{timestamp},{server_port},{lat_in_us},{queue_len},{conn_count}").expect("Failed to write to server_reply_file");
+                            writeln!(server_reply_file, "{actual_start},{timestamp},{server_port},{lat_in_us},{queue_len},{conn_count},{response_time_delta}").expect("Failed to write to server_reply_file");
                         }
                     }
                 }
@@ -1789,7 +1789,7 @@ fn zipf_process_result_final_per_server(
                     #[cfg(feature = "server-reply-analysis")]
                     {                        
                         let ServerMetadata { timestamp, server_port, queue_len, conn_count, response_time_delta } = p.server_metadata.unwrap();
-                        writeln!(server_reply_file, "{actual_start},{timestamp},{server_port},{lat_in_us},{queue_len},{conn_count}").expect("Failed to write to server_reply_file");
+                        writeln!(server_reply_file, "{actual_start},{timestamp},{server_port},{lat_in_us},{queue_len},{conn_count},{response_time_delta}").expect("Failed to write to server_reply_file");
                     }
                 }
             }
