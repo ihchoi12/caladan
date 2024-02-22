@@ -234,10 +234,10 @@ impl HttpProtocol {
                 }
                 buf.push_data(new_bytes);
             }
-            let stats: usize = u64::from_be_bytes(buf.get_data()[0..8].try_into().unwrap()).try_into().expect("u64 to usize failed");
-            let server_port = (stats >> 48) as u16;
-            let conn_count = ((stats >> 32) & 0xffff) as u16;
-            let queue_len = (stats & 0xffff_ffff) as u16;
+
+            let server_port = u16::from_be_bytes(buf.get_data()[0..2].try_into().unwrap());
+            let conn_count = u16::from_be_bytes(buf.get_data()[2..4].try_into().unwrap());
+            let queue_len = u32::from_be_bytes(buf.get_data()[4..8].try_into().unwrap()) as u16;
             let timestamp = u64::from_be_bytes(buf.get_data()[8..16].try_into().unwrap());
             buf.pull_data(16);
 
