@@ -1067,7 +1067,7 @@ fn run_client_worker(
         .for_each(|(c, p)| {
             if let Some((inst, client_port, server_metadata)) = c {
                 (*p).completion_time = Some(inst - start);
-                // (*p).completion_server_tsc = Some(server_metadata.timestamp);
+                (*p).completion_server_tsc = Some(server_metadata.unwrap().timestamp);
                 (*p).client_port = Some(client_port);
                 (*p).server_metadata = server_metadata;
             }
