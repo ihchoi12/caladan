@@ -51,11 +51,11 @@ pub struct Packet {
     work_iterations: u64,
     randomness: u64,
     target_start: Duration,
+    client_port: u16,
     actual_start: Option<Duration>,
     completion_time_ns: AtomicU64,
     completion_server_tsc: Option<u64>,
     completion_time: Option<Duration>,
-    client_port: Option<u16>,
     server_metadata: Option<ServerMetadata>,
 }
 
@@ -353,7 +353,7 @@ struct TraceResult {
     target_start: Duration,
     completion_time: Option<Duration>,
     server_tsc: u64,
-    client_port: Option<u16>,
+    client_port: u16,
     server_metadata: Option<ServerMetadata>,
 }
 
@@ -559,7 +559,7 @@ fn process_result_final(
         first_tsc.unwrap()
     );
 
-    
+    eprintln!("\n\n Writing data into files...");    
     unsafe {
         if let Some(exptid) = &EXPTID {
             if exptid != "null" {
@@ -616,7 +616,12 @@ fn process_result_final(
     if let OutputMode::Trace = sched.output {
         if let Some(exptid) = unsafe {&EXPTID} {
             if exptid != "null" {
-                
+                let sched_file_path = format!("{}.request_sched", exptid);
+                let mut sched_file = OpenOptions::new()
+                                        .append(true)
+                                        .create(true)
+                                        .open(&sched_file_path)
+                                        .expect("Failed to open file");
                 let lat_file_path = format!("{}.latency_trace", exptid);
                 let mut lat_file = OpenOptions::new()
                                                 .append(true)
@@ -635,18 +640,20 @@ fn process_result_final(
                 };
 
                 for p in results.into_iter().filter_map(|p| p.trace).kmerge() {
+                    let target_start = duration_to_ns(p.target_start);
+                    writeln!(sched_file, "{},{}", target_start, p.client_port);
                     if let Some(completion_time) = p.completion_time {
                         let target_start = duration_to_ns(p.target_start);
                         let actual_start = duration_to_ns(p.actual_start.unwrap());
                         let lat_in_us = duration_to_ns(completion_time - p.actual_start.unwrap()) as u64 / 1000;
                         // unsafe{ LATENCY_TRACE_RESULTS.push((duration_to_ns(actual_start), lat)) };
-                        writeln!(lat_file, "{},{},{}", actual_start, lat_in_us, p.client_port.unwrap()).expect("Failed to write to lat_file");
+                        writeln!(lat_file, "{},{},{},{}", target_start,actual_start, lat_in_us, p.client_port);
                         
                         #[cfg(feature = "server-reply-analysis")]
                         {
                             let ServerMetadata { timestamp, server_port, queue_len, conn_count, response_time_delta } = p.server_metadata.unwrap();
                             
-                            writeln!(server_reply_file, "{actual_start},{timestamp},{server_port},{lat_in_us},{queue_len},{conn_count},{response_time_delta}").expect("Failed to write to server_reply_file");
+                            writeln!(server_reply_file, "{target_start},{actual_start},{timestamp},{server_port},{lat_in_us},{queue_len},{conn_count},{response_time_delta}").expect("Failed to write to server_reply_file");
                         }
                     }
                 }
@@ -706,15 +713,15 @@ fn process_result(sched: &RequestSchedule, packets: &mut [Packet]) -> Option<Sch
             let mut traceresults: Vec<_> = packets
                 .into_iter()
                 .filter_map(|p| {
-                    if !p.completion_time.is_some() {
-                        return None;
-                    }
+                    // if !p.completion_time.is_some() {
+                    //     return None;
+                    // }
 
                     Some(TraceResult {
                         actual_start: p.actual_start,
                         target_start: p.target_start,
                         completion_time: p.completion_time,
-                        server_tsc: p.completion_server_tsc.unwrap(),
+                        server_tsc: p.completion_server_tsc.unwrap_or(0),
                         client_port: p.client_port,
                         server_metadata: p.server_metadata,
                     })
@@ -759,13 +766,13 @@ fn lognormal(mu: f64, sigma: f64, rand_gaussian: f64) -> f64 {
     f64::exp(mu + sigma * rand_gaussian)
 }
 
-fn gen_packets_for_schedule(schedules: &Arc<Vec<RequestSchedule>>, seed: u64) -> (Vec<Packet>, Vec<usize>) {
+fn gen_packets_for_schedule(schedules: &Arc<Vec<RequestSchedule>>, src_port: u16) -> (Vec<Packet>, Vec<usize>) {
     use rand_distr::Distribution;
     let mut packets: Vec<Packet> = Vec::new();
     
-    let mut rng: Mt64 = match seed{
+    let mut rng: Mt64 = match src_port{
         0 => Mt64::new(rand::thread_rng().gen::<u64>()),
-        _ => Mt64::new(seed),
+        _ => Mt64::new(src_port as u64),
     };
     
     let mut sched_boundaries = Vec::new();
@@ -775,7 +782,7 @@ fn gen_packets_for_schedule(schedules: &Arc<Vec<RequestSchedule>>, seed: u64) ->
     if let Some(onoff) = unsafe{ &ONOFF } {
         if onoff == "1" {
             // eprintln!("Running with On/Off pattern");
-            let mut important_rand: StdRng = StdRng::seed_from_u64(seed);
+            let mut important_rand: StdRng = StdRng::seed_from_u64(src_port as u64);
 
             // Define the mean (mu) and standard deviation (sigma) of the Gaussian distribution
             let mu = 0.0;
@@ -785,7 +792,7 @@ fn gen_packets_for_schedule(schedules: &Arc<Vec<RequestSchedule>>, seed: u64) ->
 
             let mut onoff_timestamp = last;
             for sched in schedules.iter() {
-                // eprintln!("{}, {:?}", seed, sched.arrival);
+                // eprintln!("{}, {:?}", src_port, sched.arrival);
                 // let mut is_on = true;
                 end += duration_to_ns(sched.runtime);
 
@@ -805,7 +812,7 @@ fn gen_packets_for_schedule(schedules: &Arc<Vec<RequestSchedule>>, seed: u64) ->
                     //     is_on = true;
                     // }
                     onoff_intervals.push((is_on, (onoff_timestamp, onoff_timestamp + interval_in_ns)));
-                    // eprintln!("{}, {}, {}, {}, {}", seed, is_on, onoff_timestamp, interval_in_ns, end);
+                    // eprintln!("{}, {}, {}, {}, {}", src_port, is_on, onoff_timestamp, interval_in_ns, end);
                     onoff_timestamp = onoff_timestamp + interval_in_ns;
                     
                     if is_on {
@@ -831,12 +838,13 @@ fn gen_packets_for_schedule(schedules: &Arc<Vec<RequestSchedule>>, seed: u64) ->
                         if last >= *interval_end {
                             break;
                         }
-                        // eprintln!("{}, {}, {}", seed, last, is_on);
+                        // eprintln!("{}, {}, {}", src_port, last, is_on);
                         if *is_on {
                             packets.push(Packet {
                                 randomness: rng.gen::<u64>(),
                                 target_start: Duration::from_nanos(last),
                                 work_iterations: sched.service.sample(&mut rng),
+                                client_port: src_port,
                                 ..Default::default()
                             });
                         }
@@ -863,6 +871,7 @@ fn gen_packets_for_schedule(schedules: &Arc<Vec<RequestSchedule>>, seed: u64) ->
                         randomness: rng.gen::<u64>(),
                         target_start: Duration::from_nanos(last),
                         work_iterations: sched.service.sample(&mut rng),
+                        client_port: src_port,
                         ..Default::default()
                     });
         
@@ -892,7 +901,7 @@ fn run_client_worker(
     live_mode_socket: Option<Arc<Connection>>,
 ) -> Vec<Option<ScheduleResult>> {
     let mut payload = Vec::with_capacity(4096);
-    let (mut packets, sched_boundaries) = gen_packets_for_schedule(&schedules, index as u64);
+    let (mut packets, sched_boundaries) = gen_packets_for_schedule(&schedules, index as u16);
     let src_addr = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), (index) as u16);
     let live_mode = live_mode_socket.is_some();
     let socket = match live_mode_socket {
@@ -915,7 +924,7 @@ fn run_client_worker(
         // (Instant, tsc, server port, client port, queue len, conn count)
         // let mut receive_times: Vec<Option<(Instant, u64, u16, u16, u32, u16)>> = vec![None; packets_per_thread];
         // (Instant, client port, server metadata)
-        let mut receive_times: Vec<Option<(Instant, u16, Option<ServerMetadata>)>> = vec![None; packets_per_thread];
+        let mut receive_times: Vec<Option<(Instant, Option<ServerMetadata>)>> = vec![None; packets_per_thread];
         let mut buf = Buffer::new(&mut recv_buf);
         let use_ordering = rproto.uses_ordered_requests();
         wg2.done();
@@ -935,7 +944,7 @@ fn run_client_worker(
                         idx = i;
                     }
                     // eprintln!("receive");
-                    receive_times[idx] = Some((Instant::now(), src_addr.port(), server_metadata));
+                    receive_times[idx] = Some((Instant::now(), server_metadata));
                     recv_cnt += 1;
                     received_packets2.store(recv_cnt, Ordering::SeqCst)
                 }
@@ -1065,10 +1074,9 @@ fn run_client_worker(
                 .filter(|p| !proto.uses_ordered_requests() || p.actual_start.is_some()),
         )
         .for_each(|(c, p)| {
-            if let Some((inst, client_port, server_metadata)) = c {
+            if let Some((inst, server_metadata)) = c {
                 (*p).completion_time = Some(inst - start);
-                (*p).completion_server_tsc = Some(server_metadata.unwrap().timestamp);
-                (*p).client_port = Some(client_port);
+                (*p).completion_server_tsc = Some(server_metadata.map(|data| data.timestamp).unwrap_or(0));
                 (*p).server_metadata = server_metadata;
             }
         });
@@ -1515,7 +1523,7 @@ fn zipf_gen_per_server_loadshift_experiment(
                 let pps_interval = (pps_end - pps_start) / (micros.to_i64().unwrap()/1000);
                 for t in 1..(micros/1000 + 1) { /* Ramp up in 1ms increments */
                     let pps_step = pps_start + (pps_interval * t.to_i64().unwrap());
-                    eprintln!("pps_step: {}", pps_step);
+                    // eprintln!("pps_step: {}", pps_step);
                     get_zipf_distribution(pps_step as usize, alpha, num_conns_per_server)
                         .enumerate()
                         .for_each(|(conn_idx, pps)| {
@@ -1655,7 +1663,7 @@ fn zipf_process_result_final(
         first_tsc.unwrap()
     );
 
-    
+    eprintln!("\n\n Writing data into files...");
     unsafe {
         if let Some(exptid) = &EXPTID {
             if exptid != "null" {
@@ -1712,7 +1720,12 @@ fn zipf_process_result_final(
     if let OutputMode::Trace = scheds[0].output {
         if let Some(exptid) = unsafe {&EXPTID} {
             if exptid != "null" {
-                
+                let sched_file_path = format!("{}.request_sched", exptid);
+                let mut sched_file = OpenOptions::new()
+                                        .append(true)
+                                        .create(true)
+                                        .open(&sched_file_path)
+                                        .expect("Failed to open file");
                 let lat_file_path = format!("{}.latency_trace", exptid);
                 let mut lat_file = OpenOptions::new()
                                                 .append(true)
@@ -1731,18 +1744,19 @@ fn zipf_process_result_final(
                 };
 
                 for p in results.into_iter().filter_map(|p| p.trace).kmerge() {
-                    
+                    let target_start = duration_to_ns(p.target_start);
+                    writeln!(sched_file, "{},{}", target_start, p.client_port);
                     if let Some(completion_time) = p.completion_time {
                         let target_start = duration_to_ns(p.target_start);
                         let actual_start = duration_to_ns(p.actual_start.unwrap());
                         let lat_in_us = duration_to_ns(completion_time - p.actual_start.unwrap()) as u64 / 1000;
                         // unsafe{ LATENCY_TRACE_RESULTS.push((duration_to_ns(actual_start), lat)) };
-                        writeln!(lat_file, "{},{},{}", actual_start, lat_in_us, p.client_port.unwrap()).expect("Failed to write to lat_file");
+                        writeln!(lat_file, "{},{},{},{}", target_start,actual_start, lat_in_us, p.client_port);
                         
                         #[cfg(feature = "server-reply-analysis")]
                         {                            
                             let ServerMetadata { timestamp, server_port, queue_len, conn_count, response_time_delta } = p.server_metadata.unwrap();
-                            writeln!(server_reply_file, "{actual_start},{timestamp},{server_port},{lat_in_us},{queue_len},{conn_count},{response_time_delta}").expect("Failed to write to server_reply_file");
+                            writeln!(server_reply_file, "{target_start},{actual_start},{timestamp},{server_port},{lat_in_us},{queue_len},{conn_count},{response_time_delta}").expect("Failed to write to server_reply_file");
                         }
                     }
                 }
@@ -1756,9 +1770,15 @@ fn zipf_process_result_final(
 fn zipf_process_result_final_per_server(
     results: Vec<ScheduleResult>,
 ) -> bool {
-    println!("\n\n[RESULT] Writing data into files...");
+    eprintln!("\n\n Writing data into files...");
     if let Some(exptid) = unsafe {&EXPTID} {
         if exptid != "null" {
+            let sched_file_path = format!("{}.request_sched", exptid);
+                let mut sched_file = OpenOptions::new()
+                                        .append(true)
+                                        .create(true)
+                                        .open(&sched_file_path)
+                                        .expect("Failed to open file");
             
             let lat_file_path = format!("{}.latency_trace", exptid);
             let mut lat_file = OpenOptions::new()
@@ -1778,18 +1798,19 @@ fn zipf_process_result_final_per_server(
             };
 
             for p in results.into_iter().filter_map(|p| p.trace).kmerge() {
-                
+                let target_start = duration_to_ns(p.target_start);
+                writeln!(sched_file, "{},{}", target_start, p.client_port);
                 if let Some(completion_time) = p.completion_time {
                     let target_start = duration_to_ns(p.target_start);
                     let actual_start = duration_to_ns(p.actual_start.unwrap());
                     let lat_in_us = duration_to_ns(completion_time - p.actual_start.unwrap()) as u64 / 1000;
                     // unsafe{ LATENCY_TRACE_RESULTS.push((duration_to_ns(actual_start), lat)) };
-                    writeln!(lat_file, "{},{},{}", actual_start, lat_in_us, p.client_port.unwrap()).expect("Failed to write to lat_file");
+                    writeln!(lat_file, "{},{},{},{}", target_start,actual_start, lat_in_us, p.client_port);
                     
                     #[cfg(feature = "server-reply-analysis")]
                     {                        
                         let ServerMetadata { timestamp, server_port, queue_len, conn_count, response_time_delta } = p.server_metadata.unwrap();
-                        writeln!(server_reply_file, "{actual_start},{timestamp},{server_port},{lat_in_us},{queue_len},{conn_count},{response_time_delta}").expect("Failed to write to server_reply_file");
+                        writeln!(server_reply_file, "{target_start},{actual_start},{timestamp},{server_port},{lat_in_us},{queue_len},{conn_count},{response_time_delta}").expect("Failed to write to server_reply_file");
                     }
                 }
             }
@@ -2481,7 +2502,7 @@ fn main() {
                     },
                     ("resp", _) => {
                         let protocol = RespProtocol::with_args(&matches, Transport::Tcp);
-                        // protocol.preload_servers(backend, Transport::Tcp, addrs[0]);
+                        protocol.preload_servers(backend, Transport::Tcp, addrs[0]);
                     }
                     _ => (),
                 };
@@ -2513,12 +2534,12 @@ fn main() {
                         let num_servers = loadshift_spec.as_str().matches('/').count() + 1;
                         assert!(nthreads % num_servers == 0);
                         let mut schedules = zipf_gen_per_server_loadshift_experiment(&loadshift_spec, distribution, nthreads, alpha, output, num_servers);
-                        for schedule_vec in &schedules {
-                            for schedule in schedule_vec {
-                                eprintln!("{:?}, {:?}", schedule.rps, schedule.runtime);
-                            }
-                            eprint!("\n\n");
-                        }
+                        // for schedule_vec in &schedules {
+                        //     for schedule in schedule_vec {
+                        //         eprintln!("{:?}, {:?}", schedule.rps, schedule.runtime);
+                        //     }
+                        //     eprint!("\n\n");
+                        // }
                         let schedules = schedules.into_iter().map(|e| Arc::new(e)).collect();
                         zipf_run_client_per_server(
                             proto,
