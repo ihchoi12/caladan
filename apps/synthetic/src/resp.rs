@@ -218,7 +218,15 @@ impl RespProtocol {
                     .map(
                         |string| {
                             let key = format!("{STRING_KEY_BASE}{string}");
-                            let value = format!("{string}");
+                            let value = {
+                                let mut rng = thread_rng();
+                                let mut value = [0u8; 64];
+                                for byte in value.as_mut_slice() {
+                                    *byte = rng.gen_range(0, 10) + 48;
+                                }
+                                std::str::from_utf8(&value).unwrap().to_string()
+                            };
+
                             format!("*3\r\n$3\r\nSET\r\n${}\r\n{}\r\n${}\r\n{}\r\n", key.len(), key, value.len(), value)
                         }
                     )

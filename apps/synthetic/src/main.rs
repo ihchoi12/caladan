@@ -560,6 +560,7 @@ fn process_result_final(
     );
 
     eprintln!("\n\n Writing data into files...");    
+    // return true;
     unsafe {
         if let Some(exptid) = &EXPTID {
             if exptid != "null" {
@@ -2502,7 +2503,7 @@ fn main() {
                     },
                     ("resp", _) => {
                         let protocol = RespProtocol::with_args(&matches, Transport::Tcp);
-                        protocol.preload_servers(backend, Transport::Tcp, addrs[0]);
+                        // protocol.preload_servers(backend, Transport::Tcp, addrs[0]);
                     }
                     _ => (),
                 };
