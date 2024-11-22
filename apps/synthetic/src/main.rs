@@ -491,12 +491,13 @@ fn process_result_final(
     if packet_count <= 1 {
         println!("WARNING: packet_count <= 1");
         println!(
-            "[RESULT] {}, {}, 0, {}, {}, {}",
-            sched.arrival.name(),
+            // "[RESULT] {}, {}, 0, {}, {}, {}",
+            "[RESULT] {}, 0, {}, {}, NA, NA, NA, NA, NA",
+            // sched.arrival.name(),
             sched.rps,
             drop_count,
             never_sent_count,
-            start_unix.duration_since(UNIX_EPOCH).unwrap().as_secs()
+            // start_unix.duration_since(UNIX_EPOCH).unwrap().as_secs()
         );
         return false;
     }
@@ -542,11 +543,12 @@ fn process_result_final(
     let start_unix = wct_start + first_send;
 
     println!(
-        "[RESULT] {}, {}, {}, {}, {}, {}, {:.1}, {:.1}, {:.1}, {:.1}, {:.1}, {}, {}",
-        sched.arrival.name(),
+        // "[RESULT] {}, {}, {}, {}, {}, {}, {:.1}, {:.1}, {:.1}, {:.1}, {:.1}, {}, {}",
+        "[RESULT] {}, {}, {}, {}, {:.1}, {:.1}, {:.1}, {:.1}, {:.1}",
+        // sched.arrival.name(),
         sched.rps,
-        (packet_count + drop_count) as u64 * 1000_000_000
-            / duration_to_ns(last_send.unwrap() - first_send),
+        // (packet_count + drop_count) as u64 * 1000_000_000
+        //     / duration_to_ns(last_send.unwrap() - first_send),
         packet_count as u64 * 1000_000_000 / duration_to_ns(last_recv.unwrap() - first_send),
         drop_count,
         never_sent_count,
@@ -555,12 +557,12 @@ fn process_result_final(
         percentile(99.0),
         percentile(99.9),
         percentile(99.99),
-        start_unix.duration_since(UNIX_EPOCH).unwrap().as_secs(),
-        first_tsc.unwrap()
+        // start_unix.duration_since(UNIX_EPOCH).unwrap().as_secs(),
+        // first_tsc.unwrap()
     );
 
     eprintln!("\n\n Writing data into files...");    
-    // return true;
+    return true;
     unsafe {
         if let Some(exptid) = &EXPTID {
             if exptid != "null" {
@@ -694,7 +696,7 @@ fn process_result(sched: &RequestSchedule, packets: &mut [Packet]) -> Option<Sch
                 let latency_ns = duration_to_ns(*end - *start);
                 // Add the latency to the latencies_raw vector
                 latencies_raw.push(latency_ns / 1000);
-                
+                // eprintln!("{:?} {:?} {}", start, end, latency_ns/1000);
                 // Update the latencies BTreeMap
                 *latencies.entry(latency_ns / 1000).or_insert(0) += 1;
             }
@@ -2488,7 +2490,8 @@ fn main() {
                 };
 
                 if !live_mode {
-                    println!("Distribution, RPS, Target, Actual, Dropped, Never Sent, Median, 90th, 99th, 99.9th, 99.99th, Start, StartTsc");
+                    // println!("Distribution, RPS, Target, Actual, Dropped, Never Sent, Median, 90th, 99th, 99.9th, 99.99th, Start, StartTsc");
+                    println!("RPS, Actual, Dropped, Never Sent, Median, 90th, 99th, 99.9th, 99.99th");
                 }
                 match (matches.value_of("protocol").unwrap(), &barrier_group) {
                     (_, Some(lockstep::Group::Client(ref _c))) => (),
