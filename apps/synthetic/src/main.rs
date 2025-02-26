@@ -489,7 +489,7 @@ fn process_result_final(
     }
 
     if packet_count <= 1 {
-        println!("WARNING: packet_count <= 1");
+        eprintln!("WARNING: packet_count <= 1");
         println!(
             // "[RESULT] {}, {}, 0, {}, {}, {}",
             "[RESULT] {}, 0, {}, {}, NA, NA, NA, NA, NA",
@@ -561,7 +561,7 @@ fn process_result_final(
         // first_tsc.unwrap()
     );
 
-    eprintln!("\n\n Writing data into files...");    
+    eprintln!("\n\n[0] Writing data into files...");    
     return true;
     unsafe {
         if let Some(exptid) = &EXPTID {
@@ -668,7 +668,7 @@ fn process_result_final(
 }
 
 fn process_result(sched: &RequestSchedule, packets: &mut [Packet]) -> Option<ScheduleResult> {
-    // println!("packets.len(): {}", packets.len());
+    // eprintln!("[process_result] packets.len(): {}", packets.len());
     if packets.len() == 0 {
         return None;
     }
@@ -682,13 +682,14 @@ fn process_result(sched: &RequestSchedule, packets: &mut [Packet]) -> Option<Sch
     let mut latencies = BTreeMap::new();
     let mut latencies_raw: Vec<u64> = Vec::new(); 
     for p in packets.iter() {
+        // eprintln!("client_port: {}, actual_start: {:?}, completion_time: {:?}", p.client_port, p.actual_start, p.completion_time);
         match (p.actual_start, p.completion_time) {
             (None, _) => {
-                // println!("never sent!");
+                // eprintln!("never sent!");
                 never_sent += 1
             },
             (_, None) => {
-                // println!("dropped!");
+                // eprintln!("dropped!");
                 dropped += 1
             },
             (Some(ref start), Some(ref end)) => {
@@ -863,27 +864,31 @@ fn gen_packets_for_schedule(schedules: &Arc<Vec<RequestSchedule>>, src_port: u16
         else{
             // eprintln!("Running w/o On/Off pattern");
             for sched in schedules.iter() {
+                // eprintln!("[sched] src_port: {}, rps: {}", src_port, sched.rps);
                 end += duration_to_ns(sched.runtime);
-                
-                loop {
-                    // eprintln!("{}", last);
-                    if last >= end {
-                        break;
-                    }
-                    packets.push(Packet {
-                        randomness: rng.gen::<u64>(),
-                        target_start: Duration::from_nanos(last),
-                        work_iterations: sched.service.sample(&mut rng),
-                        client_port: src_port,
-                        ..Default::default()
-                    });
-        
-                    let nxt = last + sched.arrival.sample(&mut rng);
-                    if nxt >= end {
+                if sched.rps == 0 {
+                    last = end;
+                }else{
+                    loop {
+                        // eprintln!("src_port: {}, end: {}, last: {}", src_port, end, last);
+                        if last >= end {
+                            break;
+                        }
+                        packets.push(Packet {
+                            randomness: rng.gen::<u64>(),
+                            target_start: Duration::from_nanos(last),
+                            work_iterations: sched.service.sample(&mut rng),
+                            client_port: src_port,
+                            ..Default::default()
+                        });
+            
+                        let nxt = last + sched.arrival.sample(&mut rng);
+                        if nxt >= end {
+                            last = nxt;
+                            break;
+                        }
                         last = nxt;
-                        break;
                     }
-                    last = nxt;
                 }
                 sched_boundaries.push(packets.len());
             }
@@ -969,6 +974,8 @@ fn run_client_worker(
 
     // Start a timer thread that cancels the send thread if it is still running
     // 500ms after it should have finished by triggering a shutdown on the socket.
+    let port = socket.local_addr().port();
+    // eprintln!("Port: {}, Packets length: {}", port, packets.len());
     let last = packets[packets.len() - 1].target_start;
     let socket2 = socket.clone();
     let wg2 = wg.clone();
@@ -994,6 +1001,7 @@ fn run_client_worker(
     
     let pl = packets.len();
     for (i, packet) in packets.iter_mut().enumerate() {
+        // eprintln!("* port: {}, total: {}, nsent: {}", port, pl, nsent);
         payload.clear();
         proto.gen_req(i, packet, &mut payload);
 
@@ -1003,12 +1011,13 @@ fn run_client_worker(
             t = start.elapsed();
         }
         if !live_mode && t > packet.target_start + Duration::from_micros(5) {
+            // eprintln!("* port: {}, NEVER SENT", port);
             continue;
         }
 
         // packet.actual_start = Some(packet.target_start);
         packet.actual_start = Some(start.elapsed());
-
+        // eprintln!("* port: {}, SENT", port);
         #[cfg(feature = "split-requests")]
         {
             if let Err(e) = (&*socket).write_all(&payload[..20]) {
@@ -1039,7 +1048,7 @@ fn run_client_worker(
             break;
         }
         nsent += 1; 
-        // println!("total: {}, nsent: {}", pl, nsent);
+        // eprintln!("* port: {}, total: {}, nsent: {}", port, pl, nsent);
         // Check if the counter has reached 100
         // if nsent >= 1000 {
         //     break;  // Break the loop after 100 iterations
@@ -1383,6 +1392,25 @@ fn get_zipf_distribution(
     range.into_iter().map(move |i| (total_pps as f64 * (c / (i as f64).powf(alpha))))
 }
 
+fn get_partial_uniform_distribution(
+    total_pps: usize,
+    nthreads: usize,
+    n_on_threads: usize,
+) -> impl Iterator<Item = f64> {
+    // Ensure we don't exceed the number of threads
+    assert!(n_on_threads <= nthreads, "n_on_threads cannot exceed nthreads");
+
+    let rate_per_thread = total_pps as f64 / n_on_threads as f64;
+
+    (0..nthreads).map(move |i| {
+        if i < n_on_threads {
+            rate_per_thread
+        } else {
+            0.0
+        }
+    })
+}//HERE
+
 fn zipf_gen_classic_packet_schedule(
     runtime: Duration,
     pps: f64,
@@ -1418,7 +1446,7 @@ fn zipf_gen_classic_packet_schedule(
 
     let ns_per_packet = 1_000_000_000.0 / pps;
 
-    eprint!("{}    ", pps as usize);
+    // eprint!("{}    ", pps as usize);
     
     sched.push(RequestSchedule {
         // arrival: Distribution::Constant(ns_per_packet as u64),
@@ -1551,6 +1579,48 @@ fn zipf_gen_per_server_loadshift_experiment(
     schedules
 }
 
+
+fn gen_partial_uniform_experiment(
+    packets_per_second: usize,
+    spec: &str,
+    service: Distribution,
+    nthreads: usize,
+    output: OutputMode,
+) -> Vec<Vec<RequestSchedule>> {
+    let mut schedules: Vec<Vec<RequestSchedule>> = vec![vec![]; nthreads];
+    for (step_idx, step_spec) in spec.split(",").enumerate(){
+        // eprintln!("* step_idx: {}, step_spec: {}", step_idx, step_spec);    
+        let s: Vec<&str> = step_spec.split(":").collect();
+        assert!(s.len() == 2);
+        
+        let n_on_threads: usize = s[0].parse().unwrap();
+        let micros: u64 = s[1].parse().unwrap();
+        
+        get_partial_uniform_distribution(packets_per_second, nthreads, n_on_threads)
+            .enumerate()
+            .for_each(|(conn_idx, pps)| {
+                let mut ns_per_packet: f64 = 0.0;
+                if pps != 0.0 {
+                    ns_per_packet = 1_000_000_000.0 / pps;
+                }
+                // eprint!("{}    ", pps as usize);
+                schedules[conn_idx].push(
+                    RequestSchedule {
+                        // arrival: Distribution::Constant(ns_per_packet as u64),
+                        arrival: Distribution::Exponential(ns_per_packet as f64),
+                        service,
+                        output,
+                        runtime: Duration::from_micros(micros),
+                        rps: pps as usize,
+                        discard_pct: 0.0,
+                    }
+                );
+            });
+    }
+    
+    schedules
+}
+
 fn zipf_process_result_final(
     total_pps: usize,
     scheds: Vec<RequestSchedule>,
@@ -1580,6 +1650,7 @@ fn zipf_process_result_final(
     // let total_pps = scheds.iter().map(|e| e.rps).sum::<usize>();
 
     if packet_count <= 1 {
+        eprintln!("WARNING: packet_count <= 1");
         println!(
             "\n\n[RESULT] {}, {}, 0, {}, {}, {}",
             scheds[0].arrival.name(),
@@ -1650,10 +1721,11 @@ fn zipf_process_result_final(
     }).fold(0, |s, e| s + e);
 
     println!(
-        "\n\n[RESULT] {}, {}, {}, {}, {}, {}, {:.1}, {:.1}, {:.1}, {:.1}, {:.1}, {}, {}",
-        scheds[0].arrival.name(),
+        // "\n\n[RESULT] {}, {}, {}, {}, {}, {}, {:.1}, {:.1}, {:.1}, {:.1}, {:.1}, {}, {}",
+        "\n\n[RESULT] {}, {}, {}, {}, {:.1}, {:.1}, {:.1}, {:.1}, {:.1}, {}, {}",
+        // scheds[0].arrival.name(),
         total_pps,
-        target,
+        // target,
         actual,
         drop_count,
         never_sent_count,
@@ -1666,7 +1738,8 @@ fn zipf_process_result_final(
         first_tsc.unwrap()
     );
 
-    eprintln!("\n\n Writing data into files...");
+    eprintln!("\n\n[1] Writing data into files...");
+    return true;
     unsafe {
         if let Some(exptid) = &EXPTID {
             if exptid != "null" {
@@ -1773,15 +1846,15 @@ fn zipf_process_result_final(
 fn zipf_process_result_final_per_server(
     results: Vec<ScheduleResult>,
 ) -> bool {
-    eprintln!("\n\n Writing data into files...");
+    eprintln!("\n\n[2] Writing data into files...");
     if let Some(exptid) = unsafe {&EXPTID} {
         if exptid != "null" {
             let sched_file_path = format!("{}.request_sched", exptid);
-                let mut sched_file = OpenOptions::new()
-                                        .append(true)
-                                        .create(true)
-                                        .open(&sched_file_path)
-                                        .expect("Failed to open file");
+            let mut sched_file = OpenOptions::new()
+                                    .append(true)
+                                    .create(true)
+                                    .open(&sched_file_path)
+                                    .expect("Failed to open file");
             
             let lat_file_path = format!("{}.latency_trace", exptid);
             let mut lat_file = OpenOptions::new()
@@ -1851,7 +1924,10 @@ fn zipf_run_client_per_server(
             let wg_start = wg_start.clone();
             let schedules = schedules.clone();
             let addr = addrs[i % addrs.len()];
-
+            // eprintln!("Client index: {}", client_idx);
+            // for schedule in schedules.iter() {
+            //     eprintln!("{:?}", schedule.rps);
+            // }
             backend.spawn_thread(move || {
                 run_client_worker(
                     proto, backend, addr, tport, wg, wg_start, schedules, client_idx, None,
@@ -2268,6 +2344,13 @@ fn main() {
                 .help("loadshift spec"),
         )
         .arg(
+            Arg::with_name("partial_uniform")
+                .long("partial_uniform")
+                .takes_value(true)
+                .default_value("")
+                .help("partial uniform spec"),
+        )
+        .arg(
             Arg::with_name("live")
                 .long("live")
                 .takes_value(false)
@@ -2375,6 +2458,7 @@ fn main() {
     };
 
     let loadshift_spec = value_t_or_exit!(matches, "loadshift", String);
+    let partial_uniform_spec = value_t_or_exit!(matches, "partial_uniform", String);
     let fwspec = value_t_or_exit!(matches, "fakework", String);
     let fakeworker = Arc::new(FakeWorker::create(&fwspec).unwrap());
 
@@ -2405,10 +2489,12 @@ fn main() {
         .filter(|&alpha| if nthreads == 1 {
             panic!("ZIPF distribution was selected with only 1 thread.");
             false
-        } else if alpha == 0.0 {
-            panic!("Alpha = 0 is a uniform distribution.");
-            false
-        } else {
+        } 
+        // else if alpha == 0.0 {
+        //     panic!("Alpha = 0 is a uniform distribution.");
+        //     false
+        // } 
+        else {
             true
         });
 
@@ -2506,7 +2592,7 @@ fn main() {
                     },
                     ("resp", _) => {
                         let protocol = RespProtocol::with_args(&matches, Transport::Tcp);
-                        // protocol.preload_servers(backend, Transport::Tcp, addrs[0]);
+                        protocol.preload_servers(backend, Transport::Tcp, addrs[0]);
                     }
                     _ => (),
                 };
@@ -2569,6 +2655,34 @@ fn main() {
                             1,
                         );
                     }
+                    // write_latency_trace_results();
+                    if let Some(ref mut g) = barrier_group {
+                        g.barrier();
+                    }
+                    return;
+                }
+
+                if !partial_uniform_spec.is_empty() {
+                    let mut schedules = gen_partial_uniform_experiment(packets_per_second, &partial_uniform_spec, distribution, nthreads, output);
+                    // for schedule_vec in &schedules {
+                    //     for schedule in schedule_vec {
+                    //         eprintln!("{:?}, {:?}", schedule.rps, schedule.runtime);
+                    //     }
+                    //     eprint!("\n\n");
+                    // }
+                    let schedules = schedules.into_iter().map(|e| Arc::new(e)).collect();
+                    zipf_run_client_per_server(
+                        proto,
+                        backend,
+                        &addrs,
+                        nthreads,
+                        tport,
+                        &mut barrier_group,
+                        schedules,
+                        1,
+                        1,
+                    );
+                    
                     // write_latency_trace_results();
                     if let Some(ref mut g) = barrier_group {
                         g.barrier();

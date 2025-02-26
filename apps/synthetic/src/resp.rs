@@ -226,7 +226,7 @@ impl RespProtocol {
                                 }
                                 std::str::from_utf8(&value).unwrap().to_string()
                             };
-
+                            eprintln!("*3\r\n$3\r\nSET\r\n${}\r\n{}\r\n${}\r\n{}\r\n", key.len(), key, value.len(), value);
                             format!("*3\r\n$3\r\nSET\r\n${}\r\n{}\r\n${}\r\n{}\r\n", key.len(), key, value.len(), value)
                         }
                     )
