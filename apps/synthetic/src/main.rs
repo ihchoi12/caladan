@@ -645,6 +645,9 @@ fn process_result_final(
                 for p in results.into_iter().filter_map(|p| p.trace).kmerge() {
                     let target_start = duration_to_ns(p.target_start);
                     writeln!(sched_file, "{},{}", target_start, p.client_port);
+                    if target_start < 200_000_000{
+                        continue; // discard the first 100ms for warmup
+                    }
                     if let Some(completion_time) = p.completion_time {
                         let target_start = duration_to_ns(p.target_start);
                         let actual_start = duration_to_ns(p.actual_start.unwrap());
@@ -912,6 +915,7 @@ fn run_client_worker(
     let (mut packets, sched_boundaries) = gen_packets_for_schedule(&schedules, index as u16);
     let src_addr = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), (index) as u16);
     let live_mode = live_mode_socket.is_some();
+    // eprintln!("index {} packets.len() {}", index, packets.len());
     let socket = match live_mode_socket {
         Some(sock) => sock,
         _ => Arc::new(match tport {
@@ -989,6 +993,9 @@ fn run_client_worker(
             return;
         }
         backend.sleep(last + Duration::from_millis(500));
+        // to test server with some delay
+        // backend.sleep(last + Duration::from_millis(20000));
+        
         if Arc::strong_count(&socket2) > 1 {
             socket2.shutdown();
         }
@@ -1406,10 +1413,10 @@ fn get_partial_uniform_distribution(
         if i < n_on_threads {
             rate_per_thread
         } else {
-            0.0
+            270.0 // temporary value to simulate low-rate clients
         }
     })
-}//HERE
+}
 
 fn zipf_gen_classic_packet_schedule(
     runtime: Duration,
@@ -1485,7 +1492,10 @@ fn zipf_gen_loadshift_experiment(
                 ppss.push(packets_per_second as usize);
                 get_zipf_distribution(packets_per_second as usize, alpha, nthreads)
                     .enumerate()
-                    .for_each(|(i, pps)| {
+                    .for_each(|(i, mut pps)| {
+                        if pps < 1.0 {
+                            pps = 1.0; // generate at least 1 packet per second
+                        }
                         let ns_per_packet = 1_000_000_000.0 / pps;
                         eprint!("{}    ", pps as usize);
                         acc[i].push(
@@ -1598,12 +1608,15 @@ fn gen_partial_uniform_experiment(
         
         get_partial_uniform_distribution(packets_per_second, nthreads, n_on_threads)
             .enumerate()
-            .for_each(|(conn_idx, pps)| {
+            .for_each(|(conn_idx, mut pps)| {
                 let mut ns_per_packet: f64 = 0.0;
                 if pps != 0.0 {
                     ns_per_packet = 1_000_000_000.0 / pps;
+                    if pps < 1.0 {
+                        pps = 1.0; // Set pps to 1 to discriminate it from real 0
+                    }
                 }
-                // eprint!("{}    ", pps as usize);
+                // eprint!("{} pps ({} ns/pkt)         //", pps, ns_per_packet);
                 schedules[conn_idx].push(
                     RequestSchedule {
                         // arrival: Distribution::Constant(ns_per_packet as u64),
@@ -1739,7 +1752,7 @@ fn zipf_process_result_final(
     );
 
     eprintln!("\n\n[1] Writing data into files...");
-    return true;
+    // return true;
     unsafe {
         if let Some(exptid) = &EXPTID {
             if exptid != "null" {
@@ -1822,6 +1835,9 @@ fn zipf_process_result_final(
                 for p in results.into_iter().filter_map(|p| p.trace).kmerge() {
                     let target_start = duration_to_ns(p.target_start);
                     writeln!(sched_file, "{},{}", target_start, p.client_port);
+                    if target_start < 200_000_000{
+                        continue; // discard the first 100ms for warmup
+                    }
                     if let Some(completion_time) = p.completion_time {
                         let target_start = duration_to_ns(p.target_start);
                         let actual_start = duration_to_ns(p.actual_start.unwrap());
@@ -1846,6 +1862,62 @@ fn zipf_process_result_final(
 fn zipf_process_result_final_per_server(
     results: Vec<ScheduleResult>,
 ) -> bool {
+    let mut buckets: BTreeMap<u64, usize> = BTreeMap::new();
+    let mut latencies_raw: Vec<u64> = Vec::new();
+
+    let packet_count = results.iter().map(|res| res.packet_count).sum::<usize>();
+    let drop_count = results.iter().map(|res| res.drop_count).sum::<usize>();
+    let never_sent_count = results
+        .iter()
+        .map(|res| res.never_sent_count)
+        .sum::<usize>();
+    let first_send = results.iter().filter_map(|res| res.first_send).min();
+    let last_send = results.iter().filter_map(|res| res.last_send).max();
+    let last_recv = results.iter().filter_map(|res| res.last_recv).max();
+    let first_tsc = results.iter().filter_map(|res| res.first_tsc).min();
+
+    // let total_pps = scheds.iter().map(|e| e.rps).sum::<usize>();
+
+    if packet_count <= 1 {
+        eprintln!("WARNING: packet_count <= 1");
+        return false;
+    }
+
+    results.iter().for_each(|res| {
+        if *res != Default::default() {
+            for (k, v) in &res.latencies {
+                *buckets.entry(*k).or_insert(0) += v;
+            }
+            for lat in &res.latencies_raw {
+                latencies_raw.push(*lat);
+            }
+        }
+    });
+
+    let percentile = |p| {
+        let idx = ((packet_count + drop_count) as f32 * p / 100.0) as usize;
+        if idx >= packet_count {
+            return INFINITY;
+        }
+
+        let mut seen = 0;
+        for k in buckets.keys() {
+            seen += buckets[k];
+            if seen >= idx {
+                return *k as f32;
+            }
+        }
+        return INFINITY;
+    };
+
+    println!(
+        "Median (us): {: <7}\t99th (us): {: <7}\t99.9th (us): {: <7}",
+        percentile(50.0) as usize,
+        percentile(99.0) as usize,
+        percentile(99.9) as usize
+    );
+    
+
     eprintln!("\n\n[2] Writing data into files...");
     if let Some(exptid) = unsafe {&EXPTID} {
         if exptid != "null" {
@@ -1876,8 +1948,10 @@ fn zipf_process_result_final_per_server(
             for p in results.into_iter().filter_map(|p| p.trace).kmerge() {
                 let target_start = duration_to_ns(p.target_start);
                 writeln!(sched_file, "{},{}", target_start, p.client_port);
-                if let Some(completion_time) = p.completion_time {
-                    let target_start = duration_to_ns(p.target_start);
+                if target_start < 200_000_000{
+                    continue; // discard the first 100ms for warmup
+                }
+                if let Some(completion_time) = p.completion_time { 
                     let actual_start = duration_to_ns(p.actual_start.unwrap());
                     let lat_in_us = duration_to_ns(completion_time - p.actual_start.unwrap()) as u64 / 1000;
                     // unsafe{ LATENCY_TRACE_RESULTS.push((duration_to_ns(actual_start), lat)) };
@@ -2719,7 +2793,11 @@ fn main() {
                 if let Some(alpha) = zipf {
                     let pps_distribution = get_zipf_distribution(packets_per_second, alpha, nthreads);
                     eprintln!("\n");
-                    let schedules = pps_distribution.map(|pps| {
+                    let schedules = pps_distribution.map(|mut pps| {
+                        if pps < 1.0 {
+                            pps = 1.0;
+                        }
+                        // eprintln!("pps: {}      //", pps);
                         Arc::new(zipf_gen_classic_packet_schedule(
                             runtime,
                             pps,
