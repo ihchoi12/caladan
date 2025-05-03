@@ -149,6 +149,7 @@ impl<'a> Buffer<'a> {
         }
 
         if self.data_size() == self.buf.len() {
+            eprintln!("Need larger buffers");
             return Err(Error::new(ErrorKind::Other, "Need larger buffers"));
         }
 
@@ -202,7 +203,7 @@ fn run_linux_udp_server(
             backend.spawn_thread(move || {
                 let socket = backend.create_udp_connection(addr, None).unwrap();
                 println!("Bound to address {}", socket.local_addr());
-                let mut buf = vec![0; 4096];
+                let mut buf = vec![0; 1024 * 128];
                 loop {
                     let (len, remote_addr) = socket.recv_from(&mut buf[..]).unwrap();
                     let payload = Payload::deserialize(&mut &buf[..len]).unwrap();
@@ -489,7 +490,7 @@ fn process_result_final(
     }
 
     if packet_count <= 1 {
-        eprintln!("WARNING: packet_count <= 1");
+        eprintln!("[0] WARNING: packet_count <= 1");
         println!(
             // "[RESULT] {}, {}, 0, {}, {}, {}",
             "[RESULT] {}, 0, {}, {}, NA, NA, NA, NA, NA",
@@ -871,6 +872,13 @@ fn gen_packets_for_schedule(schedules: &Arc<Vec<RequestSchedule>>, src_port: u16
                 end += duration_to_ns(sched.runtime);
                 if sched.rps == 0 {
                     last = end;
+                    packets.push(Packet {
+                        randomness: rng.gen::<u64>(),
+                        target_start: Duration::from_nanos(last),
+                        work_iterations: sched.service.sample(&mut rng),
+                        client_port: src_port,
+                        ..Default::default()
+                    });
                 }else{
                     loop {
                         // eprintln!("src_port: {}, end: {}, last: {}", src_port, end, last);
@@ -1391,12 +1399,18 @@ fn get_zipf_distribution(
     let c = (1..nthreads + 1)
         .fold(0.0, |acc, i| acc + (i as f64).powf(alpha).recip())
         .recip();
+    // let c = 1.0 / nthreads as f64; // uniform
 
     let mut range: Vec<_> = (1..=nthreads).collect();
     
     // range.shuffle(&mut StdRng::seed_from_u64(unsafe{ COUNTER }));
-    // eprintln!("{:?}", range);
+    // for i in &range {
+    //     // let value = total_pps as f64 * (c / (*i as f64).powf(alpha));
+    //     let value = total_pps as f64 * c;
+    //     eprintln!("i = {}, value = {}", i, value);
+    // }
     range.into_iter().map(move |i| (total_pps as f64 * (c / (i as f64).powf(alpha))))
+    // range.into_iter().map(move |i| (total_pps as f64 * c)) // uniform
 }
 
 fn get_partial_uniform_distribution(
@@ -1663,7 +1677,7 @@ fn zipf_process_result_final(
     // let total_pps = scheds.iter().map(|e| e.rps).sum::<usize>();
 
     if packet_count <= 1 {
-        eprintln!("WARNING: packet_count <= 1");
+        eprintln!("[1] WARNING: packet_count <= 1");
         println!(
             "\n\n[RESULT] {}, {}, 0, {}, {}, {}",
             scheds[0].arrival.name(),
@@ -1792,6 +1806,7 @@ fn zipf_process_result_final(
                 } else {
                     eprintln!("Failed to create file {}.latency", exptid);
                 }
+                return true;
 
                 if let Ok(mut file) = File::create(format!("{}.latency_raw", exptid)) {
                     for (index, latency) in latencies_raw.iter().enumerate() {
@@ -1879,7 +1894,7 @@ fn zipf_process_result_final_per_server(
     // let total_pps = scheds.iter().map(|e| e.rps).sum::<usize>();
 
     if packet_count <= 1 {
-        eprintln!("WARNING: packet_count <= 1");
+        eprintln!("[2] WARNING: packet_count <= 1");
         return false;
     }
 
@@ -1919,6 +1934,61 @@ fn zipf_process_result_final_per_server(
     
 
     eprintln!("\n\n[2] Writing data into files...");
+
+    unsafe {
+        if let Some(exptid) = &EXPTID {
+            if exptid != "null" {
+                if let Ok(mut file) = File::create(format!("{}.latency", exptid)) {
+                    let mut latencies: Vec<f64> = Vec::new();
+                    let mut counts: Vec<usize> = Vec::new();
+
+                    for (k, v) in buckets.iter() {
+                        latencies.push(*k as f64);
+                        counts.push(*v);
+                    }
+
+                    let total_count: u32 = counts.iter().map(|&count| count as u32).sum();
+                    
+                    
+                    write!(file, "Latencies: \n").expect("Failed to write to file");
+                    let mut cumulative_percentage = 0.0;
+                    for (k, v) in buckets.iter() {
+                        let percentage = (*v as f64 / total_count as f64) * 100.0; // Calculate the percentage
+                        cumulative_percentage += percentage;
+                        write!(file, "{},{},{:.2}\n", k, buckets[k], cumulative_percentage).expect("Failed to write to file");
+                    }
+                    writeln!(file, "").expect("Failed to write to file");
+                    
+                    
+                    let mean: f64 = latencies.iter().zip(counts.iter()).map(|(&l, &c)| l * c as f64).sum::<f64>() / total_count as f64;
+                    let squared_diffs: Vec<f64> = latencies.iter().map(|&x| (x - mean).powi(2)).collect();
+                    let variance: f64 = squared_diffs.iter().sum::<f64>() / total_count as f64;
+                    let standard_deviation: f64 = variance.sqrt();
+                    // let sqdiff = squared_diffs.iter().sum::<f64>();
+                    // writeln!(file, "Total Count: {}", total_count).expect("Failed to write to file");
+                    writeln!(file, "Mean: {:.2}", mean).expect("Failed to write to file");
+                    // writeln!(file, "squared_diffs: {:.2}", sqdiff).expect("Failed to write to file");
+                    // writeln!(file, "variance: {:.2}", variance).expect("Failed to write to file");
+                    writeln!(file, "Standard Deviation: {:.2}", standard_deviation).expect("Failed to write to file");
+
+                } else {
+                    eprintln!("Failed to create file {}.latency", exptid);
+                }
+                return true;
+
+                if let Ok(mut file) = File::create(format!("{}.latency_raw", exptid)) {
+                    for (index, latency) in latencies_raw.iter().enumerate() {
+                        writeln!(file, "{},{}", index, latency)
+                            .expect("Failed to write to file");
+                    }
+                } else {
+                    eprintln!("Failed to create file {}..latency_raw", exptid);
+                }
+            }
+        }
+    }
+
+
     if let Some(exptid) = unsafe {&EXPTID} {
         if exptid != "null" {
             let sched_file_path = format!("{}.request_sched", exptid);
