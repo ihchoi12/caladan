@@ -1209,6 +1209,115 @@ fn run_live_client(
     }
 }
 
+fn run_shortflow_client(
+    proto: Arc<Box<dyn LoadgenProtocol>>,
+    backend: Backend,
+    addrs: &Vec<SocketAddrV4>,
+    nthreads: usize,
+    tport: Transport,
+    barrier_group: &mut Option<lockstep::Group>,
+    runtime: Duration,
+) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let wg = shenango::WaitGroup::new();
+    let stats = Arc::new(Mutex::new(Vec::new()));
+    let start = Instant::now();
+
+    for i in 0..nthreads {
+        let stop_flag = stop_flag.clone();
+        let backend = backend.clone();
+        let addr = addrs[i % addrs.len()];
+        let proto = proto.clone();
+        let wg = wg.clone();
+        let stats = stats.clone();
+        let client_port = 30000 + i as u16;
+
+        backend.spawn_thread(move || {
+            let mut buffer = vec![0u8; 4096];
+            let mut payload = Vec::with_capacity(4096);
+            let mut rng = rand::thread_rng();
+
+            while !stop_flag.load(Ordering::Relaxed) {
+                let src_addr = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), client_port);
+
+                if let Ok(mut conn) = match tport {
+                    Transport::Tcp => backend.create_tcp_connection(Some(src_addr), addr),
+                    Transport::Udp => backend.create_udp_connection(src_addr, Some(addr)),
+                } {
+                    // backend.sleep(Duration::from_millis(1)); // let TCP handshake finish
+
+                    let mut buf = Buffer::new(&mut buffer);
+                    let mut packet = Packet {
+                        randomness: rand::random(),
+                        work_iterations: 1,
+                        target_start: Duration::ZERO,
+                        client_port,
+                        ..Default::default()
+                    };
+
+                    payload.clear();
+                    proto.gen_req(0, &packet, &mut payload);
+
+                    let send_time = Instant::now();
+                    if let Err(_) = conn.write_all(&payload) {
+                        continue;
+                    }
+
+                    let _ = proto.read_response(&conn, &mut buf);
+                    let recv_time = Instant::now();
+                    let latency_us = (recv_time - send_time).as_micros() as u64;
+
+                    let mut s = stats.lock().unwrap();
+                    s.push(latency_us);
+                }
+            }
+
+            wg.done();
+        });
+    }
+
+    // Stopper thread
+    {
+        let stop_flag = stop_flag.clone();
+        backend.spawn_thread(move || {
+            backend.sleep(runtime);
+            stop_flag.store(true, Ordering::Relaxed);
+        });
+    }
+
+    wg.add(nthreads as i32);
+    wg.wait();
+
+    // Output stats
+    let stats = stats.lock().unwrap();
+    let mut data = stats.clone();
+    data.sort();
+    let count = data.len();
+    println!("\n[ShortFlow Results]");
+    println!("Total requests: {}", count);
+    println!(
+        "Throughput (RPS): {:.2}",
+        count as f64 / runtime.as_secs_f64()
+    );
+    if count > 0 {
+        let percentile = |p: f64| {
+            let idx = ((count as f64) * p / 100.0).ceil() as usize;
+            data.get(idx.min(count - 1)).cloned().unwrap_or(0)
+        };
+        println!("Median (us): {}", percentile(50.0));
+        println!("90th (us): {}", percentile(90.0));
+        println!("99th (us): {}", percentile(99.0));
+    }
+
+    if let Some(ref mut g) = *barrier_group {
+        g.barrier();
+    }
+}
+
 fn run_client(
     proto: Arc<Box<dyn LoadgenProtocol>>,
     backend: Backend,
@@ -2520,6 +2629,12 @@ fn main() {
                 .default_value("0")
                 .help("enable on/off pattern of requests"),
         )
+        .arg(
+            Arg::with_name("shortflow")
+                .long("shortflow")
+                .takes_value(false)
+                .help("Enable short-flow mode: each connection sends one request, then reconnects"),
+        )
         .args(&SyntheticProtocol::args())
         .args(&MemcachedProtocol::args())
         .args(&DnsProtocol::args())
@@ -2740,7 +2855,18 @@ fn main() {
                     }
                     _ => (),
                 };
-
+                if matches.is_present("shortflow") {
+                    run_shortflow_client(
+                        proto,
+                        backend,
+                        &addrs,
+                        nthreads,
+                        tport,
+                        &mut barrier_group,
+                        runtime,
+                    );
+                    return;
+                }
 
                 if live_mode {
                     let sched = gen_classic_packet_schedule(
