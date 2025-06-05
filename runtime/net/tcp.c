@@ -363,11 +363,18 @@ int tcp_conn_attach(tcpconn_t *c, struct netaddr laddr, struct netaddr raddr)
 	else if (laddr.ip != netcfg.addr)
 		return -EINVAL;
 
+	log_debug("trans_init_5tuple()");
 	trans_init_5tuple(&c->e, IPPROTO_TCP, &tcp_conn_ops, laddr, raddr);
-	if (laddr.port == 0)
+	
+	
+	if (laddr.port == 0){
 		ret = trans_table_add_with_ephemeral_port(&c->e);
-	else
+		log_debug("[0] laddr.port = %d", laddr.port);
+	}
+	else{
 		ret = trans_table_add(&c->e);
+		log_debug("[1] laddr.port = %d", laddr.port);
+	}
 	if (ret)
 		return ret;
 
@@ -651,6 +658,7 @@ void tcp_qclose(tcpqueue_t *q)
 static int __tcp_dial(struct netaddr laddr, struct netaddr raddr,
 	                  tcpconn_t **c_out, bool nonblocking)
 {
+	log_debug("tcp: dialing port %d:%d", raddr.ip, raddr.port);
 	struct tcp_options opts;
 	tcpconn_t *c;
 	int ret;
@@ -661,6 +669,7 @@ static int __tcp_dial(struct netaddr laddr, struct netaddr raddr,
 		return -ENOMEM;
 
 	c->nonblocking = nonblocking;
+	log_debug("tcp: connection is %s", c->nonblocking ? "nonblocking" : "blocking");
 
 	/* rewrite loopback address */
 	if (raddr.ip == MAKE_IP_ADDR(127, 0, 0, 1))
@@ -670,6 +679,7 @@ static int __tcp_dial(struct netaddr laddr, struct netaddr raddr,
 	 * Attach the connection to the transport layer. From this point onward
 	 * ingress packets can be dispatched to the connection.
 	 */
+	log_debug("tcp_conn_attach()");
 	ret = tcp_conn_attach(c, laddr, raddr);
 	if (unlikely(ret)) {
 		sfree(c);
@@ -682,6 +692,7 @@ static int __tcp_dial(struct netaddr laddr, struct netaddr raddr,
 
 	/* send a SYN to the remote host */
 	spin_lock_np(&c->lock);
+	log_debug("Sending SYN");
 	ret = tcp_tx_ctl(c, TCP_SYN, &opts);
 	if (unlikely(ret)) {
 		spin_unlock_np(&c->lock);
@@ -696,11 +707,11 @@ static int __tcp_dial(struct netaddr laddr, struct netaddr raddr,
 		*c_out = c;
 		return -EINPROGRESS;
 	}
-
+	log_debug("Wait START");
 	/* wait until the connection is established or there is a failure */
 	while (!c->tx_closed && c->pcb.state < TCP_STATE_ESTABLISHED)
 		waitq_wait(&c->tx_wq, &c->lock);
-
+	log_debug("Wait DONE");
 	/* check if the connection failed */
 	if (c->tx_closed) {
 		ret = -c->err;
@@ -914,6 +925,7 @@ static void tcp_read_finish(tcpconn_t *c, struct mbuf *m)
  */
 ssize_t tcp_read(tcpconn_t *c, void *buf, size_t len)
 {
+	log_debug("tcp_read(), len: %zu", len);
 	char *pos = buf;
 	struct list_head q;
 	struct mbuf *m;

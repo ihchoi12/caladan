@@ -227,6 +227,7 @@ static void stat_worker_udp(void *arg)
  */
 int stat_init_late(void)
 {
+	log_debug("stat_init_late()");
 	int ret;
 
 	ret = thread_spawn(stat_tcp_server, NULL);

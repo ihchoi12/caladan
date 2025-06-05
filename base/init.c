@@ -22,23 +22,25 @@ void __weak init_shutdown(int status)
 /* we initialize these early subsystems by hand */
 static int init_internal(void)
 {
+	log_debug("START init_internal()");
 	int ret;
-
-	ret = cpu_init();
+	log_debug("    cpu_init()");
+	ret = cpu_init(); // Detect and parse CPU and NUMA topology info
 	if (ret)
 		return ret;
 
+	log_debug("    time_init()"); // Calibrate TSC (timestamp counter) for time measurement
 	ret = time_init();
 	if (ret)
 		return ret;
-
-	ret = page_init();
+	log_debug("    page_init()");
+	ret = page_init(); // Initialize physical and virtual memory system (uses hugepages)
 	if (ret) {
 		log_err("Could not intialize memory. Please ensure that hugepages are "
 			    "enabled/available.");
 		return ret;
 	}
-
+	log_debug("    slab_init()");
 	return slab_init();
 }
 
@@ -53,17 +55,19 @@ extern int thread_init_perthread(void);
  */
 int base_init(void)
 {
+	log_debug("########## START base_init() ##########");
 	int ret;
 
 	ret = thread_init_perthread();
 	if (ret)
 		return ret;
-
+	
 	ret = init_internal();
 	if (ret)
 		return ret;
 
 	base_init_done = true;
+	log_debug("########## FINISH base_init() ##########");
 	return 0;
 }
 
@@ -79,6 +83,7 @@ static int init_thread_internal(void)
  */
 int base_init_thread(void)
 {
+	log_debug("START base_init_thread()");
 	int ret;
 
 	ret = thread_init_perthread();

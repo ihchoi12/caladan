@@ -1236,13 +1236,19 @@ int directpath_init(void)
 	struct ibv_device **dev_list;
 	volatile bool poll_thread_stop = false;
 
-	if (!cfg.vfio_directpath)
+	log_debug("########## START directpath_init() ##########");
+
+	if (!cfg.vfio_directpath) {
+		log_debug("DirectPath: disabled in config, skipping init");
 		return 0;
+	}
 
 	if (!nic_pci_addr_str) {
 		log_err("please supply the pci address for the nic");
 		return -EINVAL;
 	}
+
+	log_debug("DirectPath: looking for VFIO device at PCI address %s", nic_pci_addr_str);
 
 	memset(&vfattr, 0, sizeof(vfattr));
 	vfattr.pci_name = nic_pci_addr_str;
@@ -1252,28 +1258,33 @@ int directpath_init(void)
 		return -1;
 	}
 
+	log_debug("DirectPath: opening VFIO device");
 	vfcontext = ibv_open_device(dev_list[0]);
 	if (!vfcontext) {
 		log_err("enable to initialize vfio context: %d", errno);
 		return errno ? -errno : -1;
 	}
 
+	log_debug("DirectPath: allocating admin UAR");
 	admin_uar = mlx5dv_devx_alloc_uar(vfcontext, MLX5_IB_UAPI_UAR_ALLOC_TYPE_NC);
 	if (!admin_uar) {
 		log_err("failed to alloc UAR");
 		return -1;
 	}
 
+	log_debug("DirectPath: initializing command interface");
 	ret = directpath_commands_init();
 	if (ret)
 		return ret;
 
+	log_debug("DirectPath: configuring port (promiscuous mode, MTU, MAC)");
 	ret = directpath_setup_port();
 	if (ret) {
 		log_err("failed to setup port");
 		return ret;
 	}
 
+	log_debug("DirectPath: configuring flow steering rules");
 	ret = directpath_setup_steering();
 	if (ret) {
 		log_err("failed to setup direct steering");
@@ -1281,29 +1292,39 @@ int directpath_init(void)
 	}
 
 	/* after this point, events are routed to the dataplane eq */
+	log_debug("DirectPath: initializing EQ and event handlers");
 	ret = events_init();
 	if (ret)
 		return ret;
 
 	/* spawn a temporary thread to poll the eq so we can still issue commands */
+	log_debug("DirectPath: starting temporary poll thread for EQ events");
 	ret = pthread_create(&temp_poll_thread, NULL, directpath_init_thread_poll,
 		                 (void *)&poll_thread_stop);
 	if (ret)
 		return ret;
 
+	log_debug("DirectPath: starting ARP server");
 	ret = directpath_arp_server_init();
 	if (ret)
 		return ret;
 
 	if (nr_vfio_prealloc) {
+		log_debug("DirectPath: preallocating %u %u-thread contexts (use_rmp=%d)",
+		          nr_vfio_prealloc, vfio_prealloc_nrqs, vfio_prealloc_rmp);
 		directpath_preallocate(vfio_prealloc_rmp, vfio_prealloc_nrqs, nr_vfio_prealloc);
-		log_info("control: preallocated %u %u-thread directpath contexts", nr_vfio_prealloc, vfio_prealloc_nrqs);
+		log_info("control: preallocated %u %u-thread directpath contexts",
+		         nr_vfio_prealloc, vfio_prealloc_nrqs);
 	}
 
+	log_debug("DirectPath: stopping temporary EQ poll thread");
 	poll_thread_stop = true;
 	pthread_join(temp_poll_thread, NULL);
 
+	log_debug("DirectPath: exporting BAR region (MMIO)");
 	export_fd(vfcontext, &bar_fd, &bar_offs, &bar_map_size);
+
+	log_debug("########## FINISH directpath_init() ##########");
 
 	return 0;
 }

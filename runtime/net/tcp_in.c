@@ -505,15 +505,15 @@ __tcp_rx_conn(tcpconn_t *c, struct mbuf *m, uint32_t ack, uint32_t snd_nxt,
 	if (unlikely(ack_same && c->pcb.snd_una != c->pcb.snd_nxt &&
 		     len == 0 && !wnd_updated)) {
 		c->rep_acks++;
-		if (c->rep_acks >= TCP_FAST_RETRANSMIT_THRESH) {
-			if (c->tx_exclusive) {
-				c->do_fast_retransmit = true;
-				c->fast_retransmit_last_ack = ack;
-			} else {
-				retransmit = tcp_tx_fast_retransmit_start(c);
-			}
-			c->rep_acks = 0;
-		}
+		// if (c->rep_acks >= TCP_FAST_RETRANSMIT_THRESH) {
+		// 	if (c->tx_exclusive) {
+		// 		c->do_fast_retransmit = true;
+		// 		c->fast_retransmit_last_ack = ack;
+		// 	} else {
+		// 		retransmit = tcp_tx_fast_retransmit_start(c);
+		// 	}
+		// 	c->rep_acks = 0;
+		// }
 	} else if (c->pcb.snd_una == ack) {
 		c->rep_acks = 0;
 	}

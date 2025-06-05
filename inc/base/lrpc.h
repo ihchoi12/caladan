@@ -48,6 +48,7 @@ extern bool __lrpc_send(struct lrpc_chan_out *chan, uint64_t cmd,
 static inline bool lrpc_send(struct lrpc_chan_out *chan, uint64_t cmd,
 			     unsigned long payload)
 {
+	log_debug("lrpc_send: cmd = %lx, payload = %lx", cmd, payload);
 	struct lrpc_msg *dst;
 
 	assert(!(cmd & LRPC_DONE_PARITY));

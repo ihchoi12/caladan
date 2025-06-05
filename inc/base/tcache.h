@@ -9,6 +9,7 @@
 #include <base/list.h>
 #include <base/atomic.h>
 #include <base/thread.h>
+#include <base/log.h>
 
 #define TCACHE_MAX_MAG_SIZE	64
 #define TCACHE_DEFAULT_MAG_SIZE	32
@@ -74,6 +75,7 @@ static inline void *tcache_alloc(struct tcache_perthread *ltc)
 
 	ltc->rounds--;
 	ltc->loaded = ltc->loaded->next_item;
+	log_debug("tcache_alloc: %p", item);
 	return item;
 }
 

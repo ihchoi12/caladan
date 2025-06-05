@@ -69,14 +69,15 @@ static int run_init_handlers(const char *phase, const struct init_entry *h,
 
 	log_debug("entering '%s' init phase", phase);
 	for (i = 0; i < nr; i++) {
-		log_debug("init -> %s", h[i].name);
+		log_debug("[iokernel] init -> %s", h[i].name);
 		ret = h[i].init();
 		if (ret) {
 			log_debug("failed, ret = %d", ret);
 			return ret;
 		}
 	}
-
+	log_debug("FINISH '%s' init phase", phase);
+	
 	if (stat_logging) {
 		ret = stats_init();
 		if (ret)
@@ -116,6 +117,7 @@ static void dataplane_loop_vfio(void)
  */
 void dataplane_loop(void)
 {
+	log_debug("dataplane_loop()");
 	bool work_done;
 #if 0
 	uint64_t next_log_time = microtime();
@@ -136,6 +138,9 @@ void dataplane_loop(void)
 
 	/* run until quit or killed */
 	for (;;) {
+		printf("Press ENTER to trigger one DP loop...\n");
+	    getchar();
+
 		work_done = false;
 
 		/* handle a burst of ingress packets */
@@ -248,6 +253,8 @@ int main(int argc, char *argv[])
 				log_err("invalid pci address: %s", nic_pci_addr_str);
 				return -EINVAL;
 			}
+			log_debug("pci address: domain=%04hx, bus=%02hhx, slot=%02hhx, func=%hhd",
+				nic_pci_addr.domain, nic_pci_addr.bus, nic_pci_addr.slot, nic_pci_addr.func);
 		} else if (!strcmp(argv[i], "numanode")) {
 			if (sched_ops == &numa_ops) {
 				fprintf(stderr, "Can't combine numanode argument with numa scheduler");
@@ -276,17 +283,20 @@ int main(int argc, char *argv[])
 	}
 
 	pthread_barrier_init(&init_barrier, NULL, 2);
+	log_debug("passed pthread_barrier_init");
 
 	ret = run_init_handlers("iokernel", iok_init_handlers,
 			ARRAY_SIZE(iok_init_handlers));
+	log_debug("FINISH run_init_handlers()");
 	if (ret)
 		return ret;
 
 	iok_info->cycles_per_us = cycles_per_us;
 	iok_info->external_directpath_enabled = cfg.vfio_directpath;
 	iok_info->external_directpath_rmp = vfio_prealloc_rmp;
-
+	log_debug("START pthread_barrier_wait()");
 	pthread_barrier_wait(&init_barrier);
+	log_debug("FINISH pthread_barrier_wait()");
 
 	if (cfg.vfio_directpath)
 		dataplane_loop_vfio();

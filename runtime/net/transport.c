@@ -8,6 +8,7 @@
 #include <runtime/sync.h>
 #include <runtime/net.h>
 #include <net/ip.h>
+#include <base/log.h>
 
 #include "defs.h"
 
@@ -16,6 +17,13 @@
 /* ephemeral port definitions (IANA suggested range) */
 #define MIN_EPHEMERAL		49152
 #define MAX_EPHEMERAL		65535
+
+#define MAX_RX_RING_SIZE 256
+static struct mbuf *rx_ring[MAX_RX_RING_SIZE];
+static int rx_ring_head = 0, rx_ring_tail = 0;
+static inline bool rx_ring_full(void) {
+    return ((rx_ring_tail + 1) % MAX_RX_RING_SIZE) == rx_ring_head;
+}
 
 /* a seed value for transport handler table hashing calculations */
 static uint32_t trans_seed;
@@ -212,6 +220,7 @@ static struct trans_entry *trans_lookup(struct mbuf *m, bool reverse)
  */
 void net_rx_trans(struct mbuf *m)
 {
+	log_debug("net_rx_trans");
 	const struct ip_hdr *iphdr;
 	struct trans_entry *e;
 

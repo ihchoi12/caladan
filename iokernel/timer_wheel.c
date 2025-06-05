@@ -148,6 +148,7 @@ void proc_timer_run(uint64_t now)
 
 int proc_timer_init(void)
 {
+	log_debug("########## START proc_timer_init() ##########");
 	int i, j;
 
 	for (i = 0; i < WHEEL_COUNT; i++)
@@ -155,6 +156,14 @@ int proc_timer_init(void)
 			list_head_init(&wheels[i][j]);
 
 	timer_pos = microtime();
+
+	log_debug("Timer wheel initialized with:");
+	log_debug("  - %lu levels (WHEEL_COUNT)", WHEEL_COUNT);
+	log_debug("  - %lu buckets per level (WHEEL_SIZE)", WHEEL_SIZE);
+	log_debug("  - Min delay = %lu us, Max delay = %lu us",
+	          MIN_DELAY_US, MAX_DELAY_US);
+	log_debug("  - Current timer position = %lu us", timer_pos);
+	log_debug("########## FINISH proc_timer_init() ##########");
 
 	return 0;
 }

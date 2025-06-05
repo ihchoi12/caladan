@@ -5,6 +5,7 @@
 #include <runtime/thread.h>
 
 #include "common.h"
+#include "base/log.h"
 
 BUILD_ASSERT(sizeof(pthread_t) >= sizeof(uintptr_t));
 
@@ -93,6 +94,7 @@ static int thread_join(struct join_handle *j, void **retval)
 int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 		   void *(*start_routine)(void *), void *arg)
 {
+	log_debug("shim::pthread_create");
 	NOTSELF(pthread_create, thread, attr, start_routine, arg);
 	return thread_spawn_joinable((struct join_handle **)thread,
 				     start_routine, arg);

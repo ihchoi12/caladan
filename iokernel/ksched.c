@@ -32,10 +32,12 @@ unsigned int ksched_gens[NCPU];
  */
 int ksched_init(void)
 {
+	log_debug("########## START ksched_init() ##########");
 	char *ksched_addr;
 	int i;
 
 	/* first open the file descriptor */
+	log_debug("Opening /dev/ksched...");
 	ksched_fd = open("/dev/ksched", O_RDWR);
 	if (ksched_fd < 0) {
 		log_err("Could not find ksched kernel module (%s). Please ensure that "
@@ -43,19 +45,29 @@ int ksched_init(void)
 			    strerror(errno));
 		return -errno;
 	}
+	log_debug("Opened /dev/ksched (fd = %d)", ksched_fd);
 
 	/* then map the shared memory region with the kernel */
+	log_debug("Mapping shared memory for %d CPUs...", NCPU);
 	ksched_addr = mmap(NULL, sizeof(struct ksched_shm_cpu) * NCPU,
 		    PROT_READ | PROT_WRITE, MAP_SHARED, ksched_fd, 0);
-	if (ksched_addr == MAP_FAILED)
+	if (ksched_addr == MAP_FAILED) {
+		log_err("mmap failed: %s", strerror(errno));
 		return -errno;
+	}
+	log_debug("Shared memory mapped at %p", ksched_addr);
+	log_debug("Shared memory allows userspace to notify CPU wakeups and monitor state changes");
 
 	/* then initialize the generation numbers */
+	log_debug("Initializing generation numbers and clearing idle hints...");
 	ksched_shm = (struct ksched_shm_cpu *)ksched_addr;
 	for (i = 0; i < NCPU; i++) {
 		ksched_gens[i] = load_acquire(&ksched_shm[i].last_gen);
 		ksched_idle_hint(i, 0);
 	}
+	log_debug("Generation numbers track state changes from kernel to userspace");
+	log_debug("Idle hints prevent kernel from scheduling on managed cores");
 
-        return 0;
+	log_debug("########## FINISH ksched_init() ##########");
+	return 0;
 }

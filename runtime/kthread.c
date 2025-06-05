@@ -95,10 +95,12 @@ static __always_inline void kthread_yield_to_iokernel(void)
 	ssize_t s;
 
 	/* yield to the iokernel */
+	log_debug("kthread %p: hey ksched, I'm yielding now", k);
 	do {
 		clear_preempt_needed();
 		s = ioctl(ksched_fd, KSCHED_IOC_PARK, 0);
 	} while (unlikely(s < 0 || preempt_cede_needed(k)));
+	log_debug("kthread %p: I wake up on core %ld", k, s);
 
 	k->curr_cpu = s;
 	if (k->curr_cpu != last_core)
@@ -155,7 +157,19 @@ again:
 		if (pos == nrawake)
 			pos = 0;
 	}
-
+	log_debug("[FLOW RULE]");
+	for (int k = 0; k < nrawake; k++) {
+		int th = awakeks[k];
+		char buf[256];
+		int len = 0;
+		len += snprintf(buf + len, sizeof(buf) - len, "	kthread %d (core=%d): flow group", th, ks[th] ? ks[th]->curr_cpu : -1);
+		for (int fg = 0; fg < maxks; fg++) {
+			if (fg_map[fg] == th) {
+				len += snprintf(buf + len, sizeof(buf) - len, " %d", fg);
+			}
+		}
+		log_debug("%s", buf);
+	}
 	net_ops.steer_flows(fg_map);
 
 out:
@@ -266,10 +280,10 @@ void kthread_park(void)
 	flows_notify_parking(!preempt_cede_needed(k));
 
 	STAT(PARKS)++;
-
+	log_debug("kthread %d: parked", k->kthread_idx);
 	/* perform the actual parking */
 	kthread_yield_to_iokernel();
-
+	log_debug("kthread %d: unparked", k->kthread_idx);
 	/* iokernel has unparked us */
 	atomic_inc(&runningks);
 
@@ -288,16 +302,16 @@ void kthread_wait_to_attach(void)
 	struct kthread *k = myk();
 	int s;
 
+	log_debug("kthread %d: hey ksched, I'm Waiting for a core", k->kthread_idx);
 	do {
 		s = ioctl(ksched_fd, KSCHED_IOC_START, 0);
 	} while (s < 0);
-
 	k->curr_cpu = s;
 	store_release(&cpu_map[s].recent_kthread, k);
 
 	/* attach the kthread for the first time */
 	atomic_inc(&runningks);
-
+	log_debug("kthread %d got core %d (%d active kthreads)", k->kthread_idx, s, atomic_read(&runningks));
 	flows_notify_waking();
 }
 

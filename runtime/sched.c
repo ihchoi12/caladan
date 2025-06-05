@@ -75,6 +75,7 @@ static inline bool cores_have_affinity(unsigned int cpua, unsigned int cpub)
  */
 static __noreturn void jmp_thread(thread_t *th)
 {
+	log_debug("	jmp_thread: %p (core %d -> %d)", th, th->last_cpu, myk()->curr_cpu);
 	assert_preempt_disabled();
 	assert(th->thread_ready);
 
@@ -181,6 +182,7 @@ static void update_oldest_tsc(struct kthread *k)
 	if (load_acquire(&k->rq_head) != k->rq_tail) {
 		th = k->rq[k->rq_tail % RUNTIME_RQ_SIZE];
 		ACCESS_ONCE(k->q_ptrs->oldest_tsc) = th->ready_tsc;
+		log_debug("	update oldest_tsc to %lu", th->ready_tsc);
 	}
 }
 
@@ -225,6 +227,7 @@ static void merge_runqueues(struct kthread *l, uint32_t lsize, struct kthread *r
 
 	list_head_init(&r_ths);
 	rsize = drain_threads(r, &r_ths, rsize, true /* update_tail */);
+	log_debug("[0] update_oldest_tsc");
 	update_oldest_tsc(r);
 	spin_unlock(&r->lock);
 
@@ -345,8 +348,15 @@ static __noreturn __noinline void schedule(void)
 	ACCESS_ONCE(l->q_ptrs->rcu_gen) = l->rcu_gen;
 	assert((l->rcu_gen & 0x1) == 0x0);
 
+	log_debug("kthread %d schedule(): RESCHEDULES=%lu, PROGRAM_CYCLES=%lu (+%lu), rcu_gen=%u",
+	          l->kthread_idx, l->curr_cpu,
+	          STAT(RESCHEDULES), STAT(PROGRAM_CYCLES),
+	          start_tsc - perthread_read_stable(last_tsc), l->rcu_gen);
+
 	/* check for pending preemption */
 	if (unlikely(preempt_cede_needed(l))) {
+		log_debug("	kthread %d (core %d) has pending preemption, park and cede to iokernel",
+		          l->kthread_idx, l->curr_cpu);
 		l->parked = true;
 		spin_unlock(&l->lock);
 		kthread_park_now();
@@ -357,8 +367,10 @@ static __noreturn __noinline void schedule(void)
 	}
 
 #ifdef GC
-	if (unlikely(get_gc_gen() != l->local_gc_gen))
+	if (unlikely(get_gc_gen() != l->local_gc_gen)){
+		log_debug("	[0] gc_kthread_report()");
 		gc_kthread_report(l);
+	}
 #endif
 
 	/* if it's been too long, run the softirq handler */
@@ -366,25 +378,34 @@ static __noreturn __noinline void schedule(void)
 	    unlikely(start_tsc - l->last_softirq_tsc >=
 	             cycles_per_us * RUNTIME_WATCHDOG_US)) {
 		l->last_softirq_tsc = start_tsc;
+		log_debug("	do_watchdog()");
 		if (do_watchdog(l))
 			goto done;
 	}
 
 	/* move overflow tasks into the runqueue */
-	if (unlikely(!list_empty(&l->rq_overflow)))
+	if (unlikely(!list_empty(&l->rq_overflow))){
+		log_debug("	drain_overflow()");
 		drain_overflow(l);
+	}
 
 	/* first try the local runqueue */
-	if (l->rq_head != l->rq_tail)
+	if (l->rq_head != l->rq_tail){
+		log_debug("	local runqueue has %u threads (rq_head: %u, rq_tail: %u)",
+		        	l->rq_head - l->rq_tail, l->rq_head, l->rq_tail);
 		goto done;
+	}
 
 again:
 
-	if (unlikely(!mbufq_empty(&l->txpktq_overflow)))
+	if (unlikely(!mbufq_empty(&l->txpktq_overflow))){
+		log_debug("	net_tx_drain_overflow()");
 		net_tx_drain_overflow();
+	}
 
 	/* then check for local softirqs */
 	if (softirq_run_locked(l)) {
+		log_debug("	[0] local softirqs was scheduled");
 		STAT(SOFTIRQS_LOCAL)++;
 		goto done;
 	}
@@ -392,26 +413,35 @@ again:
 	/* then try to steal from a sibling kthread */
 	sibling = cpu_map[l->curr_cpu].sibling_core;
 	r = cpu_map[sibling].recent_kthread;
-	if (r && r != l && steal_work(l, r))
+	if (r && r != l && steal_work(l, r)){
+		log_debug("	stole work from sibling (kthread %d on core %d)",
+		          r->kthread_idx, r->curr_cpu);
 		goto done;
+	}
 
 	/* try to steal from every kthread */
 	start_idx = rand_crc32c((uintptr_t)l);
 	for (i = 0; i < maxks; i++) {
 		int idx = (start_idx + i) % maxks;
-		if (ks[idx] != l && steal_work(l, ks[idx]))
+		if (ks[idx] != l && steal_work(l, ks[idx])){
+			log_debug("	stole work from kthread %d on core %d",
+			          ks[idx]->kthread_idx, ks[idx]->curr_cpu);
 			goto done;
+		}
 	}
 
 	/* recheck for local softirqs one last time */
 	if (softirq_run_locked(l)) {
+		log_debug("	[1] local softirqs was scheduled");
 		STAT(SOFTIRQS_LOCAL)++;
 		goto done;
 	}
 
 #ifdef GC
-	if (unlikely(get_gc_gen() != l->local_gc_gen))
+	if (unlikely(get_gc_gen() != l->local_gc_gen)){
+		log_debug("	[1] gc_kthread_report()");
 		gc_kthread_report(l);
+	}
 #endif
 
 	/* keep trying to find work until the polling timeout expires */
@@ -425,7 +455,6 @@ again:
 	}
 
 	l->parked = true;
-
 	/* did not find anything to run, park this kthread */
 	STAT(SCHED_CYCLES) += perthread_get_stable(last_tsc) - start_tsc;
 	/* we may have got a preempt signal before voluntarily yielding */
@@ -441,11 +470,12 @@ done:
 	assert(l->rq_head != l->rq_tail);
 	th = l->rq[l->rq_tail++ % RUNTIME_RQ_SIZE];
 	ACCESS_ONCE(l->q_ptrs->rq_tail)++;
+	log_debug("	schedule(): pop %p (core %d -> %d)", th, th->last_cpu, l->curr_cpu);
 
 	/* move overflow tasks into the runqueue */
 	if (unlikely(!list_empty(&l->rq_overflow)))
 		drain_overflow(l);
-
+	log_debug("	[1] update_oldest_tsc");
 	update_oldest_tsc(l);
 	spin_unlock(&l->lock);
 
@@ -508,7 +538,7 @@ static __always_inline void enter_schedule(thread_t *curth)
 	/* move overflow tasks into the runqueue */
 	if (unlikely(!list_empty(&k->rq_overflow)))
 		drain_overflow(k);
-
+	log_debug("[2] update_oldest_tsc");
 	update_oldest_tsc(k);
 	spin_unlock(&k->lock);
 
@@ -610,6 +640,8 @@ void thread_ready_locked(thread_t *th)
 	}
 
 	k->rq[k->rq_head++ % RUNTIME_RQ_SIZE] = th;
+	log_debug("thread %p ready at %lu, rq_head %u, rq_tail %u",
+	          th, th->ready_tsc, k->rq_head, k->rq_tail);
 	if (k->rq_head - k->rq_tail == 1)
 		ACCESS_ONCE(k->q_ptrs->oldest_tsc) = th->ready_tsc;
 	ACCESS_ONCE(k->q_ptrs->rq_head)++;
@@ -654,6 +686,7 @@ void thread_ready_head_locked(thread_t *th)
  */
 void thread_ready(thread_t *th)
 {
+	log_debug("thread_ready: %p (core %d)", th, myk()->curr_cpu);
 	struct kthread *k;
 	uint32_t rq_tail;
 
@@ -674,6 +707,8 @@ void thread_ready(thread_t *th)
 	}
 
 	k->rq[k->rq_head % RUNTIME_RQ_SIZE] = th;
+	log_debug("put %p into runqueue (time %lu, rq_head %u, rq_tail %u)",
+	          th, th->ready_tsc, k->rq_head, k->rq_tail);
 	store_release(&k->rq_head, k->rq_head + 1);
 	if (k->rq_head - load_acquire(&k->rq_tail) == 1)
 		ACCESS_ONCE(k->q_ptrs->oldest_tsc) = th->ready_tsc;
@@ -716,11 +751,15 @@ static void thread_finish_cede(void)
 	thread_t *myth = thread_self();
 	uint64_t tsc = rdtsc();
 
+	log_debug("thread_finish_cede: [kthread %p] Entering cede (core %d, uthread %p)", k, k->curr_cpu, myth);
+
 	/* update stats and scheduler state */
 	myth->thread_running = false;
 	myth->last_cpu = k->curr_cpu;
 	perthread_store(__self, NULL);
 	STAT(PROGRAM_CYCLES) += tsc - perthread_get_stable(last_tsc);
+
+	log_debug("thread_finish_cede: [kthread %p] Marking uthread %p as ready (head of runqueue)", k, myth);
 
 	/* mark ceded thread ready at head of runqueue */
 	thread_ready_head(myth);
@@ -730,15 +769,22 @@ static void thread_finish_cede(void)
 	ACCESS_ONCE(k->q_ptrs->rcu_gen) = k->rcu_gen;
 	assert((k->rcu_gen & 0x1) == 0x0);
 
+	log_debug("thread_finish_cede: [kthread %p] Parking and yielding core to iokernel", k);
+
 	/* cede this kthread to the iokernel */
 	ACCESS_ONCE(k->parked) = true; /* deliberately racy */
 	kthread_park_now();
+
+	log_debug("thread_finish_cede: [kthread %p] Awakened by iokernel (got core %d again)", k, k->curr_cpu);
+
 	perthread_get_stable(last_tsc) = tsc;
 
 	/* increment the RCU generation number (odd - back in thread) */
 	store_release(&k->rcu_gen, k->rcu_gen + 1);
 	ACCESS_ONCE(k->q_ptrs->rcu_gen) = k->rcu_gen;
 	assert((k->rcu_gen & 0x1) == 0x1);
+
+	log_debug("thread_finish_cede: [kthread %p] Re-entering Caladan scheduler loop", k);
 
 	/* re-enter the scheduler */
 	spin_lock(&k->lock);
@@ -780,13 +826,18 @@ static __always_inline thread_t *__thread_create(void)
 	struct stack *s;
 
 	preempt_disable();
+	log_debug("1");
 	th = tcache_alloc(perthread_ptr(thread_pt));
+	log_debug("2");
 	if (unlikely(!th)) {
 		preempt_enable();
 		return NULL;
 	}
 
+	log_debug("3");
 	s = stack_alloc();
+	log_debug("4");
+	
 	if (unlikely(!s)) {
 		tcache_free(perthread_ptr(thread_pt), th);
 		preempt_enable();
@@ -835,8 +886,11 @@ thread_t *thread_create(thread_fn_t fn, void *arg)
  */
 thread_t *thread_create_with_buf(thread_fn_t fn, void **buf, size_t buf_len)
 {
+	log_debug("thread_create_with_buf: %p, buf_len %zu", fn, buf_len);
 	void *ptr;
 	thread_t *th = __thread_create();
+	log_debug("__thread_create done");
+	
 	if (unlikely(!th))
 		return NULL;
 
@@ -877,6 +931,7 @@ int thread_spawn(thread_fn_t fn, void *arg)
  */
 int thread_spawn_main(thread_fn_t fn, void *arg)
 {
+	log_debug("thread_spawn_main: %p", fn);
 	static bool called = false;
 	thread_t *th;
 
@@ -940,6 +995,7 @@ static __noreturn void schedule_start(void)
 	ACCESS_ONCE(k->q_ptrs->rcu_gen) = 1;
 
 	spin_lock(&k->lock);
+	log_debug("kthread %d got the lock", k->kthread_idx);
 	k->parked = false;
 	schedule();
 }
@@ -1009,6 +1065,7 @@ int sched_init(void)
 			if (i == j)
 				continue;
 			BUG_ON(siblings++);
+			log_debug("core %d sibling %d", i, j);
 			cpu_map[i].sibling_core = j;
 		}
 	}

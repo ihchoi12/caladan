@@ -58,6 +58,8 @@ static struct rx_net_hdr *rx_prepend_rx_preamble(struct rte_mbuf *buf)
 bool rx_send_to_runtime(struct proc *p, uint32_t hash, uint64_t cmd,
 			unsigned long payload)
 {
+	log_debug("rx_send_to_runtime(): sending command");
+
 	struct thread *th;
 
 	if (likely(sched_threads_active(p) > 0)) {
@@ -83,6 +85,7 @@ bool rx_send_to_runtime(struct proc *p, uint32_t hash, uint64_t cmd,
 
 static bool rx_send_pkt_to_runtime(struct proc *p, struct rx_net_hdr *hdr)
 {
+	log_debug("rx_send_pkt_to_runtime()");
 	shmptr_t shmptr;
 
 	shmptr = ptr_to_shmptr(&dp.ingress_mbuf_region, hdr, sizeof(*hdr));
@@ -132,12 +135,17 @@ static void rx_one_pkt(struct rte_mbuf *buf)
 	}
 
 	net_hdr = rx_prepend_rx_preamble(buf);
+	log_debug("rx: packet received for runtime (dst_ip = 0x%x, rss_hash = %u, len = %u)",
+          dst_ip, net_hdr->rss_hash, net_hdr->len);
+
 	if (!rx_send_pkt_to_runtime(p, net_hdr)) {
 		STAT_INC(RX_UNICAST_FAIL, 1);
 		goto fail_free;
 	}
 
 	if (unlikely(p->has_directpath)) {
+		log_debug("!!! packet destined to directpath runtime (pid = %d)", p->pid);
+
 		if (ether_type == ETHTYPE_IP)
 			log_warn_ratelimited("delivering an IP packet to a directpath runtime");
 	}
@@ -284,6 +292,9 @@ fail:
 int rx_init()
 {
 	/* create a mempool in shared memory to hold the rx mbufs */
+	log_debug("########## START rx_init() ##########");
+
+	log_debug("rx: creating RX mempool in shared memory");
 	dp.rx_mbuf_pool = rx_pktmbuf_pool_create_in_shm("RX_MBUF_POOL",
 			IOKERNEL_NUM_MBUFS, MBUF_CACHE_SIZE, 0, RTE_MBUF_DEFAULT_BUF_SIZE,
 			rte_socket_id());
@@ -292,6 +303,9 @@ int rx_init()
 		log_err("rx: couldn't create rx mbuf pool");
 		return -1;
 	}
+
+	log_debug("rx: successfully created RX mbuf pool");
+	log_debug("########## FINISH rx_init() ##########");
 
 	return 0;
 }

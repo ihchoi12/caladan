@@ -359,6 +359,7 @@ done:
  */
 int ioqueues_register_iokernel(void)
 {
+	log_debug("ioqueues_register_iokernel()");
 	struct control_hdr *hdr;
 	struct shm_region *r = &netcfg.tx_region;
 	struct sockaddr_un addr;

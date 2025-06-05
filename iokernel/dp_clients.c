@@ -27,6 +27,9 @@ static void dp_clients_remove_client(struct proc *p);
  */
 static void dp_clients_add_client(struct proc *p)
 {
+	log_debug("	dp_clients_add_client(): proc %p, ip %u.%u.%u.%u",
+			p, (p->ip_addr >> 24) & 0xFF, (p->ip_addr >> 16) & 0xFF,
+			(p->ip_addr >> 8) & 0xFF, p->ip_addr & 0xFF);
 	int ret;
 
 	if (!sched_attach_proc(p)) {
@@ -85,6 +88,7 @@ void proc_release(struct ref *r)
 	ssize_t ret;
 
 	struct proc *p = container_of(r, struct proc, ref);
+	log_debug("dp_clients: releasing proc %p", p);
 	if (!lrpc_send(&lrpc_data_to_control, CONTROL_PLANE_REMOVE_CLIENT,
 			(unsigned long) p))
 		log_err("dp_clients: failed to inform control of client removal");
@@ -151,6 +155,7 @@ static void dp_clients_remove_client(struct proc *p)
  */
 void dp_clients_rx_control_lrpcs(void)
 {
+	log_debug("START dp_clients_rx_control_lrpcs()");
 	uint64_t cmd;
 	unsigned long payload;
 	uint16_t n_rx = 0;
@@ -163,9 +168,11 @@ void dp_clients_rx_control_lrpcs(void)
 		switch (cmd)
 		{
 		case DATAPLANE_ADD_CLIENT:
+			log_debug("	[RX LRPC] DATAPLANE_ADD_CLIENT");
 			dp_clients_add_client(p);
 			break;
 		case DATAPLANE_REMOVE_CLIENT:
+			log_debug("	[RX LRPC] DATAPLANE_REMOVE_CLIENT");
 			dp_clients_remove_client(p);
 			break;
 		default:
@@ -174,6 +181,7 @@ void dp_clients_rx_control_lrpcs(void)
 
 		n_rx++;
 	}
+	log_debug("	END dp_clients_rx_control_lrpcs() - processed %u messages", n_rx);
 }
 
 /*

@@ -1235,13 +1235,16 @@ fn run_shortflow_client(
         let wg = wg.clone();
         let stats = stats.clone();
         let client_port = 30000 + i as u16;
-
+        eprintln!("Spawning thread {} for client port {}", i, client_port);
         backend.spawn_thread(move || {
             let mut buffer = vec![0u8; 4096];
             let mut payload = Vec::with_capacity(4096);
             let mut rng = rand::thread_rng();
 
-            while !stop_flag.load(Ordering::Relaxed) {
+            // while !stop_flag.load(Ordering::Relaxed) {
+            //     if i == nthreads - 1 {
+            //         stop_flag.store(true, Ordering::Relaxed); // temporarily only one request
+            //     }
                 let src_addr = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), client_port);
 
                 if let Ok(mut conn) = match tport {
@@ -1264,7 +1267,7 @@ fn run_shortflow_client(
 
                     let send_time = Instant::now();
                     if let Err(_) = conn.write_all(&payload) {
-                        continue;
+                        // continue;
                     }
 
                     let _ = proto.read_response(&conn, &mut buf);
@@ -1274,7 +1277,7 @@ fn run_shortflow_client(
                     let mut s = stats.lock().unwrap();
                     s.push(latency_us);
                 }
-            }
+            // }
 
             wg.done();
         });
@@ -1283,6 +1286,7 @@ fn run_shortflow_client(
     // Stopper thread
     {
         let stop_flag = stop_flag.clone();
+        eprintln!("Spawning stopper thread");
         backend.spawn_thread(move || {
             backend.sleep(runtime);
             stop_flag.store(true, Ordering::Relaxed);

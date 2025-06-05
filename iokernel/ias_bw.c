@@ -206,6 +206,7 @@ static struct pmc_sample arr_1[NCPU], arr_2[NCPU];
  */
 void ias_bw_poll(void)
 {
+	log_debug("ias_bw_poll()");
 	static struct pmc_sample *start = arr_1, *end = arr_2;
 	static int state;
 	bool throttle;
@@ -257,8 +258,12 @@ int ias_bw_init(void)
 	const char *intel_cpu_str = "GenuineIntel";
 	int namebytes[3];
 
-	if (cfg.nobw)
+	if (cfg.nobw) {
+		log_debug("		IAS-BW: Bandwidth control disabled via config (cfg.nobw=true)");
 		return 0;
+	}
+
+	log_debug("		IAS-BW: Initializing memory bandwidth monitor...");
 
 	cpuid(0, &regs);
 	namebytes[0] = regs.ebx;
@@ -270,6 +275,8 @@ int ias_bw_init(void)
 		cfg.nobw = true;
 		return 0;
 	}
+	log_debug("		IAS-BW: Intel CPU confirmed");
+
 
 	cpuid(1, &regs);
 	if (regs.ecx & (1UL << 31UL)) {
@@ -277,26 +284,36 @@ int ias_bw_init(void)
 		cfg.nobw = true;
 		return 0;
 	}
+	log_debug("		IAS-BW: No virtualization detected, proceeding");
 
-
+	log_debug("		IAS-BW: Initializing PCM backend (pcm_caladan)");
 	ret = pcm_caladan_init(0);
-	if (ret)
+	if (ret) {
+		log_err("		IAS-BW: Failed to initialize PCM driver (ret=%d)", ret);
 		return ret;
+	}
 
 	/* We monitor 1 channel, so multiply measurements by nr_channels to estimate real bw */
 	nr_channels = pcm_caladan_get_active_channel_count();
-	if (nr_channels == 0)
+	if (nr_channels == 0) {
+		log_err("		IAS-BW: No active memory channels detected");
 		return -EINVAL;
+	}
+
+	log_debug("		IAS-BW: Detected %u active DRAM channels", nr_channels);
 
 	/* Use default limit if none supplied */
 	if (!cfg.ias_bw_limit)
 		cfg.ias_bw_limit = IAS_BW_LIMIT;
 
+	log_debug("		IAS-BW: Configured DRAM bandwidth limit = %.2f MB/s", cfg.ias_bw_limit);
 	/* Compute the multiplier to convert cache lines/cycle to bytes/us (= MB/s) */
 	ias_bw_estimate_multiplier = cycles_per_us * nr_channels * CACHE_LINE_SIZE;
 
 	/* convert from MB/s to per channel cache line/cycle */
 	ias_bw_thresh = cfg.ias_bw_limit / ias_bw_estimate_multiplier;
+
+	log_debug("		IAS-BW: Bandwidth threshold set to %.4f cache lines/cycle (per channel)", ias_bw_thresh);
 
 	return 0;
 

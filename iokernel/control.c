@@ -347,6 +347,7 @@ static void control_destroy_proc(struct proc *p)
 
 static void control_add_client(void)
 {
+	log_debug("control_add_client(): new runtime client is attaching to iokernel"); 
 	struct proc *p;
 	struct ucred ucred;
 	socklen_t len;
@@ -405,7 +406,7 @@ static void control_add_client(void)
 		log_err("control: failed to add proc to epoll set");
 		goto fail_destroy_proc;
 	}
-
+	log_debug("Sending lrpc to DP: %p is added", p);
 	if (!lrpc_send(&lrpc_control_to_data, DATAPLANE_ADD_CLIENT,
 			(unsigned long) p)) {
 		log_err("control: failed to inform dataplane of new client '%d'",
@@ -428,7 +429,7 @@ fail:
 static void control_instruct_dataplane_to_remove_client(struct proc *p)
 {
 	p->removed = true;
-
+	log_debug("Sending lrpc to DP: %p is removed", p);
 	if (!lrpc_send(&lrpc_control_to_data, DATAPLANE_REMOVE_CLIENT,
 			(unsigned long)p)) {
 		log_err("control: failed to inform dataplane of removed client");
@@ -442,8 +443,10 @@ static void control_instruct_dataplane_to_remove_client(struct proc *p)
 static void control_remove_client(struct proc *p)
 {
 	/* client failed to attach to scheduler, notify with signal */
-	if (p->attach_fail)
+	if (p->attach_fail){
 		kill(p->pid, SIGINT);
+		panic("control: client %d failed to attach to scheduler", p->pid);
+	}
 
 	if (!p->removed) {
 		epoll_ctl_del(p->control_fd);
@@ -460,14 +463,17 @@ static void control_loop(void)
 	unsigned long payload;
 	struct proc *p;
 	struct epoll_event ev;
-
+	log_debug("control_loop: START pthread_barrier_wait");
 	pthread_barrier_wait(&init_barrier);
+	log_debug("control_loop: FINISH pthread_barrier_wait");
 
 	while (1) {
+		log_debug("\n ======= NEW control_loop() =======");
+		log_debug("START epoll_wait()");
 		ret = epoll_wait(epoll_fd, &ev, 1, -1);
 		while (ret == -1 && errno == EINTR)
 			ret = epoll_wait(epoll_fd, &ev, 1, -1);
-
+		log_debug("FINISH epoll_wait()");
 		if (ret != 1) {
 			log_err("control: epoll_wait got %d (errno %d)", ret, errno);
 			exit(1);
@@ -488,6 +494,7 @@ static void control_loop(void)
 				p = (struct proc *) payload;
 				assert(cmd == CONTROL_PLANE_REMOVE_CLIENT);
 				/* it is now safe to remove data structures for this client */
+				log_debug("CP: received CONTROL_PLANE_REMOVE_CLIENT %p from DP", p);
 				control_remove_client(p);
 			}
 		} while (read(data_to_control_efd, &efdval, sizeof(efdval)) == sizeof(efdval));
@@ -520,6 +527,7 @@ static int control_pin_thread(pid_t tid, int core)
 static void *control_thread(void *data)
 {
 	int ret;
+	log_debug("control_thread: attempting to pin to core %d", sched_ctrl_core);
 
 	/* pin to our assigned core */
 	ret = control_pin_thread(thread_gettid(), sched_ctrl_core);
@@ -527,6 +535,8 @@ static void *control_thread(void *data)
 		log_err("control: failed to pin control thread to core %d",
 			sched_ctrl_core);
 		/* continue running but performance is unpredictable */
+	} else {
+		log_debug("control_thread: successfully pinned to core %d", sched_ctrl_core);
 	}
 
 	control_loop();
@@ -602,6 +612,8 @@ fail:
 
 int control_init(void)
 {
+	log_debug("########## START control_init() ##########");
+
 	struct sockaddr_un addr;
 	pthread_t tid;
 	int sfd, ret;
@@ -609,6 +621,9 @@ int control_init(void)
 
 	BUILD_ASSERT(strlen(CONTROL_SOCK_PATH) <= sizeof(addr.sun_path) - 1);
 
+	// Map shared memory region for RX ingress mbufs
+	log_debug("Mapping shared memory for RX mbufs (key = %d, size = %u bytes)",
+	          INGRESS_MBUF_SHM_KEY, INGRESS_MBUF_SHM_SIZE);
 	shbuf = mem_map_shm(INGRESS_MBUF_SHM_KEY, NULL, INGRESS_MBUF_SHM_SIZE,
 			PGSIZE_2MB, true);
 	if (shbuf == MAP_FAILED) {
@@ -623,7 +638,8 @@ int control_init(void)
 	dp.ingress_mbuf_region.base = shbuf;
 	dp.ingress_mbuf_region.len = INGRESS_MBUF_SHM_SIZE;
 
-
+	// Map shared memory region for iokernel_info
+	log_debug("Mapping shared memory for iokernel_info (key = %d)", IOKERNEL_INFO_KEY);
 	shbuf = mem_map_shm(IOKERNEL_INFO_KEY, NULL, IOKERNEL_INFO_SIZE, PGSIZE_4KB, true);
 	if (shbuf == MAP_FAILED) {
 		log_err("control: failed to map iokernel control header");
@@ -636,6 +652,8 @@ int control_init(void)
 	if (nic_pci_addr_str)
 		memcpy(&iok_info->directpath_pci, &nic_pci_addr, sizeof(nic_pci_addr));
 
+	// Create UNIX domain socket
+	log_debug("Creating control UNIX socket (for runtime registration and shared memory setup)");
 	memset(&addr, 0x0, sizeof(struct sockaddr_un));
 	addr.sun_family = AF_UNIX;
 	strncpy(addr.sun_path, CONTROL_SOCK_PATH, sizeof(addr.sun_path) - 1);
@@ -658,23 +676,32 @@ int control_init(void)
 		close(sfd);
 		return -errno;
 	}
+	log_debug("UNIX socket bound and listening with backlog = %d", CTL_SOCK_BACKLOG);
 
+	// Create epoll instance
 	epoll_fd = epoll_create1(0);
 	if (epoll_fd < 0) {
 		log_err("control: failed to create epoll fd");
 		return -1;
 	}
+	log_debug("epoll instance created (fd = %d)", epoll_fd);
 
-	if (epoll_ctl_add(sfd, EPOLL_CONTROLFD_COOKIE))
+	// Register control socket to epoll
+	if (epoll_ctl_add(sfd, EPOLL_CONTROLFD_COOKIE)) {
+		log_err("control: failed to register control socket with epoll");
 		return -1;
+	}
 
+	// Set up control <-> dataplane communication channels (LRPC, eventfd)
+	log_debug("Initializing communication channels with dataplane...");
 	ret = control_init_dataplane_comm();
 	if (ret < 0) {
 		log_err("control: cannot initialize communication with dataplane");
 		return ret;
 	}
 
-	log_info("control: spawning control thread");
+	// Spawn control thread
+	log_info("control: spawning control thread on core %d", sched_ctrl_core);
 	controlfd = sfd;
 	if (pthread_create(&tid, NULL, control_thread, NULL) == -1) {
 		log_err("control: pthread_create() failed [%s]",
@@ -683,5 +710,6 @@ int control_init(void)
 		return -errno;
 	}
 
+	log_debug("########## FINISH control_init() ##########");
 	return 0;
 }

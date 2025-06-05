@@ -115,12 +115,18 @@ int mlx5_init_rxq_wq(struct mlx5_wq *wq, void *seg_buf, uint32_t *dbr,
 	struct mlx5_wqe_data_seg *seg;
 	void *buf;
 
-	ret = mlx5_init_wq(wq, seg_buf, dbr, size, stride);
-	if (unlikely(ret))
-		return ret;
+	log_debug("mlx5_init_rxq_wq: initializing RX queue with %u descriptors (stride=%u)", size, stride);
 
-	if (cfg_directpath_strided)
+	ret = mlx5_init_wq(wq, seg_buf, dbr, size, stride);
+	if (unlikely(ret)) {
+		log_err("mlx5_init_rxq_wq: failed to initialize base WQ");
+		return ret;
+	}
+
+	if (cfg_directpath_strided) {
+		log_debug("mlx5_init_rxq_wq: using strided RX buffer mode");
 		return mlx5_init_rxq_wq_stride(wq, seg_buf, dbr, size, stride, lkey);
+	}
 
 	/* set byte_count and lkey for all descriptors once */
 	for (i = 0; i < size; i++) {
@@ -130,12 +136,16 @@ int mlx5_init_rxq_wq(struct mlx5_wq *wq, void *seg_buf, uint32_t *dbr,
 
 		/* fill queue with buffers */
 		buf = mempool_alloc(&directpath_buf_mp);
-		if (unlikely(!buf))
+		if (unlikely(!buf)) {
+			log_err("mlx5_init_rxq_wq: failed to allocate RX buffer at index %u", i);
 			return -ENOMEM;
+		}
 
 		seg->addr = htobe64((unsigned long)buf + RX_BUF_HEAD + rx_mr_offset);
 		wq->buffers[i] = buf;
 	}
+
+	log_debug("mlx5_init_rxq_wq: successfully initialized %u RX buffers", size);
 
 	udma_to_device_barrier();
 	wq->dbr[0] = htobe32(size & 0xffff);
@@ -230,6 +240,7 @@ static int mlx5_gather_completions(struct mbuf **mbufs, struct mlx5_txq *v,
  */
 int mlx5_transmit_one(struct mbuf *m)
 {
+	log_debug("mlx5_transmit_one(): preparing to send %u bytes", mbuf_length(m));
 	struct kthread *k;
 	struct mlx5_txq *v;
 	struct mbuf *mbs[SQ_CLEAN_MAX];
@@ -243,8 +254,10 @@ int mlx5_transmit_one(struct mbuf *m)
 	k = getk();
 	v = &txqs[k->kthread_idx];
 	idx = v->wq.head & (v->wq.cnt - 1);
+	log_debug("	SQ head=%u, index=%u, inflight=%u", v->wq.head, idx, nr_inflight_tx(v));
 
 	if (nr_inflight_tx(v) >= SQ_CLEAN_THRESH) {
+		log_debug("	cleaning completions (inflight >= %d)", SQ_CLEAN_THRESH);
 		compl = mlx5_gather_completions(mbs, v, SQ_CLEAN_MAX);
 		for (i = 0; i < compl; i++)
 			mbuf_free(mbs[i]);
@@ -259,6 +272,7 @@ int mlx5_transmit_one(struct mbuf *m)
 	ctrl = segment;
 	eseg = segment + sizeof(*ctrl);
 	dpseg = (void *)eseg + ((offsetof(struct mlx5_wqe_eth_seg, inline_hdr) + MLX5_ETH_L2_INLINE_HEADER_SIZE) & ~0xf);
+	log_debug("	filling WQE at index %u", idx);
 
 	ctrl->opmod_idx_opcode = htobe32(((v->wq.head & 0xffff) << 8) |
 					       MLX5_OPCODE_SEND);
@@ -268,7 +282,9 @@ int mlx5_transmit_one(struct mbuf *m)
 
 	dpseg->byte_count = htobe32(mbuf_length(m) - MLX5_ETH_L2_INLINE_HEADER_SIZE);
 	dpseg->addr = htobe64((uint64_t)mbuf_data(m) + MLX5_ETH_L2_INLINE_HEADER_SIZE + tx_mr_offset);
-
+	log_debug("	HEY NIC! DMA addr=0x%lx, len=%u",
+          (uint64_t)mbuf_data(m) + MLX5_ETH_L2_INLINE_HEADER_SIZE + tx_mr_offset,
+          mbuf_length(m) - MLX5_ETH_L2_INLINE_HEADER_SIZE);
 	/* record buffer */
 	store_release(&v->wq.buffers[v->wq.head & (v->wq.cnt - 1)], m);
 	v->wq.head++;
@@ -278,12 +294,14 @@ int mlx5_transmit_one(struct mbuf *m)
 	v->wq.dbr[MLX5_SND_DBR] = htobe32(v->wq.head & 0xffff);
 
 	/* ring bf doorbell */
+	log_debug("	ringing doorbell (head=%u)", v->wq.head);
 
 	mmio_wc_start();
 	mmio_write64_be(v->bf_reg + v->bf_offset, *(__be64 *)ctrl);
 	mmio_flush_writes();
 
 	v->bf_offset ^= MLX5_BF_SIZE;
+	log_debug("	TX issued");
 
 	putk();
 
@@ -332,6 +350,7 @@ int mlx5_gather_rx(struct mlx5_rxq *v, struct mbuf **ms, unsigned int budget)
 		wqe_idx = be16toh(cqe->wqe_counter) & (v->wq.cnt - 1);
 		m = v->wq.buffers[wqe_idx];
 		mbuf_fill_cqe(m, cqe);
+		log_debug("mlx5_gather_rx: received packet %u bytes", m->len);
 		ms[rx_cnt] = m;
 	}
 

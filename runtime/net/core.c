@@ -30,6 +30,7 @@ static DEFINE_PERTHREAD(struct tcache_perthread, net_tx_buf_pt);
 
 int net_init_mempool_threads(void)
 {
+	log_debug("net_init_mempool_threads()");
 	int i;
 
 	for (i = 0; i < maxks; i++)
@@ -95,6 +96,7 @@ static uint32_t compute_flow_affinity(uint8_t ipproto, uint16_t local_port, stru
 
 static void net_rx_send_completion(unsigned long completion_data)
 {
+	log_debug("net_rx_send_completion()");
 	struct kthread *k;
 
 	k = getk();
@@ -167,6 +169,7 @@ void net_error(struct mbuf *m, int err)
 
 static void net_rx_one(struct mbuf *m)
 {
+	log_debug("net_rx_one");
 	const struct eth_hdr *llhdr;
 	const struct ip_hdr *iphdr;
 	uint16_t len;
@@ -251,6 +254,7 @@ drop:
  */
 void net_rx_batch(struct mbuf **ms, unsigned int nr)
 {
+	log_debug("net_rx_batch");
 	int i;
 
 	for (i = 0; i < nr; i++) {
@@ -262,6 +266,7 @@ void net_rx_batch(struct mbuf **ms, unsigned int nr)
 
 static void iokernel_softirq_poll(struct kthread *k)
 {
+	log_debug("iokernel_softirq_poll");
 	struct rx_net_hdr *hdr;
 	struct mbuf *m;
 	uint64_t cmd;
@@ -325,6 +330,7 @@ static void iokernel_softirq(void *arg)
  */
 void net_tx_release_mbuf(struct mbuf *m)
 {
+	log_debug("net_tx_release_mbuf()");
 	preempt_disable();
 	tcache_free(perthread_ptr(net_tx_buf_pt), m);
 	preempt_enable();
@@ -341,13 +347,16 @@ struct mbuf *net_tx_alloc_mbuf(void)
 	unsigned char *buf;
 
 	preempt_disable();
+	log_debug("[TX] PREEMPT DISABLED");
 	m = tcache_alloc(perthread_ptr(net_tx_buf_pt));
+	log_debug("tcache_alloc() done");
 	if (unlikely(!m)) {
 		preempt_enable();
 		log_warn_ratelimited("net: out of tx buffers");
 		return NULL;
 	}
 	preempt_enable();
+	log_debug("[TX] PREEMPT ENABLED");
 
 	buf = (unsigned char *)m + MBUF_HEAD_LEN;
 	mbuf_init(m, buf, net_get_mtu(), MBUF_DEFAULT_HEADROOM);
@@ -384,6 +393,7 @@ int __noinline net_tx_drain_overflow(void)
 
 static int net_tx_iokernel(struct mbuf *m)
 {
+	log_debug("net_tx_iokernel()");
 	struct kthread *k = myk();
 	unsigned int len = mbuf_length(m);
 	struct tx_net_hdr *hdr;
@@ -569,7 +579,11 @@ int net_tx_ip(struct mbuf *m, uint8_t proto, uint32_t daddr)
 			return ret;
 		}
 	}
-
+	log_debug("TX to %02X:%02X:%02X:%02X:%02X:%02X:%u.%u.%u.%u",
+			 dhost.addr[0], dhost.addr[1], dhost.addr[2],
+			 dhost.addr[3], dhost.addr[4], dhost.addr[5],
+			 (daddr >> 24) & 0xFF, (daddr >> 16) & 0xFF,
+			 (daddr >> 8) & 0xFF, daddr & 0xFF);
 	net_tx_eth(m, ETHTYPE_IP, dhost);
 	return 0;
 }
@@ -664,6 +678,7 @@ int str_to_netaddr(const char *str, struct netaddr *addr)
  */
 int net_init_thread(void)
 {
+	log_debug("net_init_thread()");
 	struct kthread *k = myk();
 	thread_t *th;
 
@@ -673,8 +688,10 @@ int net_init_thread(void)
 
 	k->iokernel_softirq = th;
 
-	if (!cfg_directpath_external())
+	if (!cfg_directpath_external()){
+		log_debug("	tcache_init_perthread(net_tx_buf_tcache)");
 		tcache_init_perthread(net_tx_buf_tcache, &perthread_get(net_tx_buf_pt));
+	}
 
 	return 0;
 }

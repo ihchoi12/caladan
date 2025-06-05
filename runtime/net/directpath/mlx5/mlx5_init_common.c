@@ -43,6 +43,7 @@ REGISTER_CFG(directpath_stride_handler);
 
 static void mlx5_softirq_strided(void *arg)
 {
+	log_debug("mlx5_softirq_strided");
 	int cnt;
 	struct mlx5_rxq *v = arg;
 	struct mbuf *ms[RUNTIME_RX_BATCH_SIZE];
@@ -59,6 +60,7 @@ static void mlx5_softirq_strided(void *arg)
 
 static void mlx5_softirq(void *arg)
 {
+	log_debug("mlx5_softirq");
 	int cnt;
 	struct mlx5_rxq *v = arg;
 	struct mbuf *ms[RUNTIME_RX_BATCH_SIZE];
@@ -115,6 +117,7 @@ static struct net_driver_ops mlx5_default_net_ops = {
 
 int mlx5_init_thread(void)
 {
+	log_debug("START mlx5_init_thread");
 	int ret;
 	struct kthread *k = myk();
 	struct hardware_queue_spec *hs;
@@ -124,8 +127,10 @@ int mlx5_init_thread(void)
 
 	if (cfg_directpath_strided)
 		v->poll_th = thread_create(mlx5_softirq_strided, v);
-	else
+	else{
+		log_debug("	thread_create(mlx5_softirq)");
 		v->poll_th = thread_create(mlx5_softirq, v);
+	}
 	if (!v->poll_th)
 		return -ENOMEM;
 

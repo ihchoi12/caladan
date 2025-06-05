@@ -18,6 +18,34 @@
 /* log levels greater than this value won't be printed */
 int max_loglevel = LOG_DEBUG;
 
+static const char *core_colors[] = {
+    "\033[31m",              // 0: Red text
+    "\033[32m",              // 1: Green text
+    "\033[34m",              // 2: Blue text
+    "\033[35m",              // 3: Magenta text
+
+    "\033[41m\033[90m",      // 32: Red bg + dark gray text
+    "\033[42m\033[90m",      // 33: Green bg + dark gray text
+    "\033[44m\033[90m",      // 34: Blue bg + dark gray text
+    "\033[45m\033[90m",      // 35: Magenta bg + dark gray text
+};
+#define COLOR_COUNT (sizeof(core_colors) / sizeof(core_colors[0]))
+static const char *color_reset = "\033[0m";
+// Returns index in core_colors for a given cpu id (0,1,2,3,32,33,34,35)
+static inline int core_color_idx(int cpu) {
+    switch (cpu) {
+        case 0:  return 0; // red text
+        case 32: return 4; // red bg
+        case 1:  return 1; // green text
+        case 33: return 5; // green bg
+        case 2:  return 2; // blue text
+        case 34: return 6; // blue bg
+        case 3:  return 3; // magenta text
+        case 35: return 7; // magenta bg
+        default: return -1;
+    }
+}
+
 void logk(int level, const char *fmt, ...)
 {
 	char buf[MAX_LOG_LEN];
@@ -29,20 +57,24 @@ void logk(int level, const char *fmt, ...)
 		return;
 
 	cpu = sched_getcpu();
+	int idx = core_color_idx(cpu);
+	const char *color = (idx < 0) ? "" : core_colors[idx];
 
 	if (likely(base_init_done)) {
 		uint64_t us = microtime();
-		sprintf(buf, "[%3d.%06d] CPU %02d| <%d> ",
+		sprintf(buf, "%s[%3d.%06d] CPU %02d| <%d> ",
+			color,
 			(int)(us / ONE_SECOND), (int)(us % ONE_SECOND),
 			cpu, level);
 	} else {
-		sprintf(buf, "CPU %02d| <%d> ", cpu, level);
+		sprintf(buf, "%sCPU %02d| <%d> ", color, cpu, level);
 	}
 
 	off = strlen(buf);
 	va_start(ptr, fmt);
-	vsnprintf(buf + off, MAX_LOG_LEN - off, fmt, ptr);
+	vsnprintf(buf + off, MAX_LOG_LEN - off - 8, fmt, ptr);
 	va_end(ptr);
+	strcat(buf, color_reset);
 	puts(buf);
 
 	// if (level <= LOG_ERR)

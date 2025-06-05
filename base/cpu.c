@@ -104,6 +104,6 @@ int cpu_init(void)
 	if (ret)
 		return ret;
 
-	log_info("cpu: detected %d cores, %d nodes", cpu_count, numa_count);
+	log_info("		cpu: detected %d cores, %d nodes", cpu_count, numa_count);
 	return 0;
 }

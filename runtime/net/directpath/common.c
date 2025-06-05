@@ -81,24 +81,33 @@ static int rx_memory_init(void)
 
 int directpath_init(void)
 {
+	log_debug("########## [RUNTIME] START directpath_init() ##########");
 	int ret;
 
-	if (!cfg_directpath_enabled())
+	if (!cfg_directpath_enabled()) {
+		log_debug("directpath: disabled by config");
 		return 0;
+	}
 
+	log_debug("directpath: initializing RX memory pool");
 	ret = rx_memory_init();
-	if (ret)
+	if (ret) {
+		log_err("directpath: failed to init RX memory pool (ret = %d)", ret);
 		return ret;
+	}
 
 	memcpy(&nic_pci_addr, &iok.iok_info->directpath_pci, sizeof(nic_pci_addr));
-
 	log_info("directpath: using pci address from iokernel: %04hx:%02hhx:%02hhx.%hhd",
 	         nic_pci_addr.domain, nic_pci_addr.bus,
 	         nic_pci_addr.slot, nic_pci_addr.func);
 
+	log_debug("directpath: calling mlx5_init()");
 	ret = mlx5_init();
-	if (!ret)
+	if (!ret) {
+		log_debug("directpath: mlx5_init() succeeded");
+		log_debug("########## [RUNTIME] FINISH directpath_init() ##########");
 		return 0;
+	}
 
 	if (getuid() != 0)
 		log_err("Could not initialize directpath. Please try again as root.");

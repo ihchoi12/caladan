@@ -222,6 +222,7 @@ __sched_run(struct core_state *s, struct thread *th, unsigned int core)
 	}
 
 	/* finally request that the new kthread run on this core */
+	log_debug("hey ksched, run %d on core %u", th ? th->tid : 0, core);
 	ksched_run(core, th ? th->tid : 0);
 
 	s->last_th = s->cur_th;
@@ -502,6 +503,7 @@ sched_measure_kthread_delay(struct proc *p, struct thread *th, uint64_t *thread_
 	/* UTHREAD: update new queueing delay signal */
 	if (cur_head != cur_tail) {
 		tmp = ACCESS_ONCE(th->q_ptrs->oldest_tsc);
+		log_debug("oldest_tsc=%lu cur_tsc=%lu", tmp, cur_tsc);
 		*thread_delay += calc_delay_tsc(tmp);
 	}
 
@@ -585,8 +587,11 @@ static void sched_measure_delay(struct proc *p)
 	uint64_t rxq_delay = 0, consumed_strides = 0, posted_strides, next_poll_tsc;
 	unsigned int i;
 
-	if (!proc_sched_should_poll(p, cur_tsc))
+	if (!proc_sched_should_poll(p, cur_tsc)){
+		log_debug("		no need to poll proc %p now (%lu), next poll at %lu",
+				p, cur_tsc, p->next_poll_tsc);
 		return;
+	}
 
 	dl.has_work = false;
 	dl.standing_queue = false;
@@ -598,7 +603,7 @@ static void sched_measure_delay(struct proc *p)
 	directpath_poll_proc_prefetch(p);
 
 	prefetch(&p->runtime_info->directpath_strides_consumed);
-
+	log_debug("		prefetched directpath data of proc %p", p);
 	next_poll_tsc = UINT64_MAX;
 
 	/* detect per-kthread delay */
@@ -607,8 +612,8 @@ static void sched_measure_delay(struct proc *p)
 		uint64_t delay = 0, next_timer_tsc;
 		th = &p->threads[i];
 
-
 		if (!thread_sched_should_poll(th, cur_tsc)) {
+			log_debug("		skip thread[%d] (core=%d) next_poll_tsc=%lu (cur_tsc=%lu)", i, th->core, th->next_poll_tsc, cur_tsc);
 			next_poll_tsc = MIN(next_poll_tsc, th->next_poll_tsc);
 			continue;
 		}
@@ -616,7 +621,10 @@ static void sched_measure_delay(struct proc *p)
 		void *prefetch1 = directpath_poll_proc_prefetch_th0(p, i);
 
 		sched_measure_kthread_delay(p, th, &delay, &rxq_delay, &busy,
-			                        &dl.standing_queue, &next_timer_tsc);
+									&dl.standing_queue, &next_timer_tsc);
+
+		log_debug("		thread[%d] (core=%d) delay=%lu rxq_delay=%lu busy=%d standing_queue=%d next_timer_tsc=%lu active=%d", 
+			i, th->core, delay, rxq_delay, busy, dl.standing_queue, next_timer_tsc, th->active);
 
 		consumed_strides += ACCESS_ONCE(th->q_ptrs->directpath_strides_consumed);
 
@@ -634,6 +642,7 @@ static void sched_measure_delay(struct proc *p)
 				dl.min_delay_core = th->core;
 			}
 		} else if (!busy && sched_proc_can_unpoll(p)) {
+			log_debug("		thread[%d] (core=%d) inactive, can unpoll, set next_poll_tsc=%lu", i, th->core, next_timer_tsc);
 			thread_set_next_poll(th, next_timer_tsc);
 			next_poll_tsc = MIN(next_poll_tsc, next_timer_tsc);
 		}
@@ -642,14 +651,22 @@ static void sched_measure_delay(struct proc *p)
 
 	bool directpath_armed = true;
 	if (p->has_vfio_directpath) {
+		log_debug("		directpath: proc %p has_vfio_directpath=1", p);
 		directpath_armed = directpath_poll_proc(p, &rxq_delay, cur_tsc);
+
+		log_debug("		directpath: proc %p armed=%d, rxq_delay=%lu, consumed_strides=%lu", p, directpath_armed, rxq_delay, consumed_strides);
 
 		consumed_strides += atomic64_read(&p->runtime_info->directpath_strides_consumed);
 		posted_strides = ACCESS_ONCE(p->runtime_info->directpath_strides_posted);
 		posted_strides <<= DIRECTPATH_STRIDE_SHIFT;
 
+		log_debug("		directpath: proc %p posted_strides=%lu, consumed_strides=%lu (threshold=%d)", 
+			p, posted_strides, consumed_strides, DIRECTPATH_STRIDE_REFILL_THRESH_HI);
+
 		if (posted_strides && posted_strides >= consumed_strides &&
 		    posted_strides - consumed_strides < DIRECTPATH_STRIDE_REFILL_THRESH_HI) {
+			log_debug("		directpath: proc %p refill triggered (diff=%lu)", 
+				p, posted_strides - consumed_strides);
 			rx_send_to_runtime(p, 0, RX_REFILL_BUFS, 0);
 			STAT_INC(RX_REFILL, 1);
 			dl.has_work = true;
@@ -658,6 +675,7 @@ static void sched_measure_delay(struct proc *p)
 	}
 
 	if (rxq_delay) {
+		log_debug("		rxq_delay: proc %p rxq_delay=%lu", p, rxq_delay);
 		dl.max_delay_us += rxq_delay;
 		dl.avg_delay_us += rxq_delay * sched_threads_active(p);
 		dl.min_delay_us += rxq_delay;
@@ -665,26 +683,40 @@ static void sched_measure_delay(struct proc *p)
 		dl.has_work = true;
 		dl.standing_queue |= rxq_delay >= IOKERNEL_POLL_INTERVAL * cycles_per_us;
 		dl.parked_thread_busy |= sched_threads_active(p) == 0;
+		log_debug("		rxq_delay: updated has_work=%d, standing_queue=%d, parked_thread_busy=%d",
+			dl.has_work, dl.standing_queue, dl.parked_thread_busy);
 	}
 
 	/* don't report parked busy if no threads are active */
-	if (cfg.noidlefastwake && sched_threads_active(p) == 0)
+	if (cfg.noidlefastwake && sched_threads_active(p) == 0) {
+		log_debug("		cfg.noidlefastwake active, forcibly clearing parked_thread_busy for proc %p", p);
 		dl.parked_thread_busy = false;
+	}
 
 	/* convert the delays to us */
+	double prev_max_delay_us = dl.max_delay_us, prev_min_delay_us = dl.min_delay_us, prev_avg_delay_us = dl.avg_delay_us;
 	dl.max_delay_us /= (double)cycles_per_us;
 	dl.min_delay_us /= (double)cycles_per_us;
 	dl.avg_delay_us /= (double)(cycles_per_us * sched_threads_active(p));
+	log_debug("		delay conversion: max %.2f -> %.2f us, min %.2f -> %.2f us, avg %.2f -> %.2f us", 
+		prev_max_delay_us, dl.max_delay_us, prev_min_delay_us, dl.min_delay_us, prev_avg_delay_us, dl.avg_delay_us);
 
 	/* report delay back to runtime */
 	sched_report_metrics(p, dl.max_delay_us);
 
 	/* notify the scheduler policy of the current delay */
-	if (sched_ops->notify_congested(p, &dl))
+	log_debug("		sched notify_congested(): %p max delay %.2f us, min delay %.2f us, avg delay %.2f us",
+		p, dl.max_delay_us, dl.min_delay_us, dl.avg_delay_us);
+
+	if (sched_ops->notify_congested(p, &dl)) {
+		log_debug("		sched_policy: proc %p is congested, polling disabled", p);
 		proc_disable_sched_poll(p);
-	else if (sched_threads_active(p) == 0 && !dl.has_work &&
-	    directpath_armed && sched_proc_can_unpoll(p))
+	} else if (sched_threads_active(p) == 0 && !dl.has_work &&
+			directpath_armed && sched_proc_can_unpoll(p)) {
+		log_debug("		sched_policy: proc %p idle (no active thread, no work, armed, can unpoll), next_poll_tsc=%lu", 
+			p, next_poll_tsc);
 	    proc_set_next_poll(p, next_poll_tsc);
+	}
 }
 
 /*
@@ -750,6 +782,7 @@ rewake:
  */
 void sched_poll(void)
 {
+	log_debug("sched_poll() begin");
 	static uint64_t last_time;
 	DEFINE_BITMAP(idle, NCPU);
 	struct core_state *s;
@@ -760,45 +793,55 @@ void sched_poll(void)
 	/*
 	 * slow pass --- runs every IOKERNEL_POLL_INTERVAL
 	 */
-
+	log_debug("START SLOW PASS");
 	cur_tsc = rdtsc();
 	now = (cur_tsc - start_tsc) / cycles_per_us;
 	if (cur_tsc - last_time >= IOKERNEL_POLL_INTERVAL * cycles_per_us) {
 
+		log_debug("	running periodic tasks (interval=%dus)", IOKERNEL_POLL_INTERVAL);
 		STAT_INC(SCHED_RUN, 1);
 
 		/* retrieve current network device tick */
 		hw_timestamp_update();
+		log_debug("	SLOW: Updated HW timestamp = %u", curr_hw_time);
 
 		proc_timer_run(now);
+		log_debug("	SLOW: processed timer events");
 
 		last_time = cur_tsc;
 		list_for_each_safe(&poll_list, p, p_next, link) {
+			log_debug("	SLOW: Measuring delay for process %p", p);
 			prefetch(p_next);
 			sched_measure_delay(p);
 		}
 	} else if (!cfg.noidlefastwake && !cfg.vfio_directpath) {
 		/* check if any idle directpath runtimes have received I/Os */
+		log_debug("[1] checking for idle DirectPath runtimes");
 		for (i = 0; i < dp.nr_clients; i++) {
 			p = dp.clients[i];
 			if (p->has_vfio_directpath)
 				continue;
-			if (p->has_directpath && sched_threads_active(p) == 0)
+			if (p->has_directpath && sched_threads_active(p) == 0) {
+				log_debug("  SLOW: Detecting IO for idle DirectPath process %p", p);
 				sched_detect_io_for_idle_runtime(p);
+			}
 		}
 	}
+	log_debug("END SLOW PASS");
 
 	/*
 	 * fast pass --- runs every poll loop
 	 */
-
+	log_debug("START FAST PASS");
 	bitmap_init(idle, NCPU, false);
 	sched_for_each_allowed_core(core, i) {
 		s = &state[core];
 
 		/* check if a pending context switch finished */
 		if (s->wait && ksched_poll_run_done(core)) {
+			log_debug("	Context switch to thread %p is done on core %d", s->cur_th, core);
 			if (s->last_th) {
+				log_debug("	Cleaning up the last thread %p on core %d", s->last_th, core);
 				sched_disable_kthread(s->last_th, core);
 				proc_put(s->last_th->p);
 				s->last_th = NULL;
@@ -808,6 +851,7 @@ void sched_poll(void)
 
 				s->pending_th = NULL;
 				s->pending = false;
+				log_debug("	Switching to pending kthread %p on core %d", th, core);
 				if (s->cur_th)
 					ACCESS_ONCE(s->cur_th->q_ptrs->cede_gen) =
 						s->cur_th->wake_gen;
@@ -823,9 +867,13 @@ void sched_poll(void)
 
 		/* check if a core went idle */
 		if (!s->wait && !s->idle && ksched_poll_idle(core)) {
+			log_debug("	Core %d became idle", core);
 			if (s->cur_th) {
-				if (!cfg.vfio_directpath && sched_try_fast_rewake(s->cur_th) == 0)
+				if (!cfg.vfio_directpath && sched_try_fast_rewake(s->cur_th) == 0) {
+					log_debug("	Fast rewake kthread %p on core %d is successful", s->cur_th, core);
 					continue;
+				}
+				log_debug("	Cleaning up thread %p on idle core %d", s->cur_th, core);
 				sched_disable_kthread(s->cur_th, core);
 				proc_put(s->cur_th->p);
 				s->cur_th = NULL;
@@ -835,13 +883,16 @@ void sched_poll(void)
 			idle_cnt++;
 		}
 	}
-
+	log_debug("END FAST PASS");
 	/*
 	 * final pass --- let the scheduler policy decide how to respond
 	 */
+	log_debug("CALLING SCHEDULER POLICY");
 
 	sched_ops->sched_poll(now, idle_cnt, idle);
+
 	ksched_send_intrs();
+	log_debug("sched_poll() end");
 }
 
 /**
@@ -868,6 +919,7 @@ int sched_add_core(struct proc *p)
  */
 int sched_attach_proc(struct proc *p)
 {
+	log_debug("	sched_attach_proc(): process %p", p);
 	int i, ret;
 
 	if (p->sched_cfg.guaranteed_cores + nr_guaranteed > sched_cores_nr) {
@@ -953,15 +1005,17 @@ static int sched_scan_node(int node)
  */
 int sched_init(void)
 {
+	log_debug("########## START sched_init() ##########");
 	int i;
 	bool valid = true;
 
+	log_debug("Initializing sched_allowed_cores bitmap to empty");
 	bitmap_init(sched_allowed_cores, cpu_count, false);
 
 	/*
 	 * first pass: scan and log CPUs
 	 */
-
+	log_debug("Scanning NUMA nodes and detecting hyperthread sibling pairs");
 	log_info("sched: CPU configuration...");
 	for (i = 0; i < numa_count; i++) {
 		printf("\tnode %d: ", i);
@@ -970,13 +1024,15 @@ int sched_init(void)
 		printf("\n");
 		fflush(stdout);
 	}
-	if (!valid)
+	if (!valid) {
+		log_debug("Invalid CPU topology or HT config detected. Aborting sched_init.");
 		return -EINVAL;
+	}
 
 	/*
 	 * second pass: determine available CPUs
 	 */
-
+	log_debug("Selecting CPUs eligible for scheduling (NUMA + user-supplied bitmap)");
 	for (i = 0; i < cpu_count; i++) {
 		if (cpu_info_tbl[i].package != managed_numa_node && sched_ops != &numa_ops)
 			continue;
@@ -989,15 +1045,31 @@ int sched_init(void)
 	}
 	/* check for minimum number of cores required */
 	i = bitmap_popcount(sched_allowed_cores, NCPU);
+	char core_list[1024] = {0};
+	size_t offset = 0;
+	int j;
+	for (j = 0; j < NCPU; j++) {
+		if (bitmap_test(sched_allowed_cores, j)) {
+			offset += snprintf(core_list + offset, sizeof(core_list) - offset, "%d,", j);
+			if (offset >= sizeof(core_list))
+				break;
+		}
+	}
+
+	if (offset > 0)
+		core_list[offset - 1] = '\0'; // 마지막 콤마 제거
+
+	log_debug("Total eligible schedulable cores: %d (CPUs: %s)", i, core_list);
+
 	if (i < 4) {
-		log_err("sched: %d is not enough cores\n", i);
+		log_err("sched: %d is not enough cores", i);
 		return -EINVAL;
 	}
 
 	/*
 	 * third pass: reserve cores for iokernel and system
 	 */
-
+	log_debug("Reserving one core for control thread and one for dataplane thread");
 	sched_ctrl_core = bitmap_find_next_set(sched_allowed_cores, NCPU, 0);
 	if (cfg.noht)
 		sched_dp_core = bitmap_find_next_set(sched_allowed_cores, NCPU, sched_ctrl_core + 1);
@@ -1010,6 +1082,7 @@ int sched_init(void)
 
 	/* check if configuration disables hyperthreads */
 	if (cfg.noht) {
+		log_debug("Hyperthreading disabled: removing sibling cores from sched_allowed_cores");
 		for (i = 0; i < NCPU; i++) {
 			if (!bitmap_test(sched_allowed_cores, i))
 				continue;
@@ -1020,10 +1093,13 @@ int sched_init(void)
 			bitmap_clear(sched_allowed_cores, sched_siblings[i]);
 		}
 	}
+	log_debug("Building polling table from allowed cores");
 
 	/* generate polling arrays */
 	bitmap_for_each_set(sched_allowed_cores, NCPU, i)
 		sched_cores_tbl[sched_cores_nr++] = i;
 
+	log_debug("Total polling cores: %d", sched_cores_nr);
+	log_debug("########## FINISH sched_init() ##########");
 	return 0;
 }

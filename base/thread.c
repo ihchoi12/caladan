@@ -84,6 +84,7 @@ pid_t thread_gettid(void)
  */
 int thread_init_perthread(void)
 {
+	log_debug("START thread_init_perthread");
 	int ret;
 	unsigned int thread_id;
 

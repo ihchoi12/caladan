@@ -23,7 +23,7 @@
 #define TCP_OOQ_ACK_TIMEOUT	(300 * ONE_MS)
 #define TCP_TIME_WAIT_TIMEOUT	(1 * ONE_SECOND) /* FIXME: should be 8 minutes */
 #define TCP_ZERO_WND_TIMEOUT	(300 * ONE_MS) /* FIXME: should be dynamic */
-#define TCP_RETRANSMIT_TIMEOUT	(300 * ONE_MS) /* FIXME: should be dynamic */
+#define TCP_RETRANSMIT_TIMEOUT	(30000 * ONE_MS) /* FIXME: should be dynamic */
 #define TCP_FAST_RETRANSMIT_THRESH 3
 #define TCP_OOO_MAX_SIZE	2048
 #define TCP_RETRANSMIT_BATCH	16

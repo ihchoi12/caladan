@@ -192,6 +192,7 @@ int gc_remove_thread(thread_t *th)
 
 int gc_register_thread(thread_t *th)
 {
+	log_debug("gc_register_thread(%p)", th);
 	unsigned int aff;
 
 	if (!cfg_gc_enabled)

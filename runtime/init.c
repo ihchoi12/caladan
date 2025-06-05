@@ -93,7 +93,7 @@ static int run_init_handlers(const char *phase,
 
 	log_debug("entering '%s' init phase", phase);
 	for (i = 0; i < nr; i++) {
-		log_debug("init -> %s", h[i].name);
+		log_debug("[runtime] init -> %s", h[i].name);
 		ret = h[i].init();
 		if (ret) {
 			log_debug("failed, ret = %d", ret);
@@ -125,6 +125,7 @@ static int runtime_init_thread(void)
 
 static void *pthread_entry(void *data)
 {
+	log_debug("pthread_entry()");
 	int ret;
 
 	ret = runtime_init_thread();
@@ -132,6 +133,7 @@ static void *pthread_entry(void *data)
 
 	pthread_barrier_wait(&init_barrier);
 	pthread_barrier_wait(&init_barrier);
+	log_debug("	pthread_entry: sched_start()");
 	sched_start();
 
 	/* never reached unless things are broken */
@@ -163,6 +165,7 @@ int runtime_set_initializers(initializer_fn_t global_fn,
  */
 int runtime_init(const char *cfgpath, thread_fn_t main_fn, void *arg)
 {
+	log_debug("START runtime_init");
 	pthread_t tid[NCPU];
 	int ret, i;
 
@@ -234,10 +237,11 @@ int runtime_init(const char *cfgpath, thread_fn_t main_fn, void *arg)
 			return ret;
 		}
 	}
-
+	log_debug("runtime_init(): sched_start()");
 	sched_start();
 
 	/* never reached unless things are broken */
+	log_err("BUG: runtime_init(): sched_start() returned, this should never happen");
 	BUG();
 	return 0;
 }
