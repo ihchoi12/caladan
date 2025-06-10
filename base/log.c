@@ -13,6 +13,12 @@
 #include <base/time.h>
 #include <asm/ops.h>
 
+__attribute__((weak))
+int log_get_kthread_id(void)
+{
+    return -1;  // default: no kthread info available
+}
+
 #define MAX_LOG_LEN 4096
 
 /* log levels greater than this value won't be printed */
@@ -57,20 +63,32 @@ void logk(int level, const char *fmt, ...)
 		return;
 
 	cpu = sched_getcpu();
-	int idx = core_color_idx(cpu);
-	const char *color = (idx < 0) ? "" : core_colors[idx];
+	const char *color = "";
+    int kth_id = -1;
+
 
 	if (likely(base_init_done)) {
-		uint64_t us = microtime();
-		sprintf(buf, "%s[%3d.%06d] CPU %02d| <%d> ",
-			color,
-			(int)(us / ONE_SECOND), (int)(us % ONE_SECOND),
-			cpu, level);
-	} else {
-		sprintf(buf, "%sCPU %02d| <%d> ", color, cpu, level);
-	}
+		kth_id = log_get_kthread_id();
 
-	off = strlen(buf);
+        int color_id = (kth_id >= 0) ? kth_id : cpu;
+        int idx = core_color_idx(color_id);
+        color = (idx < 0) ? "" : core_colors[idx];
+
+		uint64_t us = microtime();
+        off = sprintf(buf, "%s[%3d.%06d] CPU %02d| <%d> ",
+                      color,
+                      (int)(us / ONE_SECOND), (int)(us % ONE_SECOND),
+                      cpu, level);
+
+        if (kth_id >= 0)
+			off += snprintf(buf + off, MAX_LOG_LEN - off, "KTH %d| ", kth_id);
+
+    } else {
+		int idx = core_color_idx(cpu);
+        color = (idx < 0) ? "" : core_colors[idx];
+        off = sprintf(buf, "%sCPU %02d| <%d> ", color, cpu, level);
+    }
+
 	va_start(ptr, fmt);
 	vsnprintf(buf + off, MAX_LOG_LEN - off - 8, fmt, ptr);
 	va_end(ptr);

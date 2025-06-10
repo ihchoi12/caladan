@@ -81,7 +81,7 @@ int kthread_init_thread(void)
 
 	perthread_store(kthread_idx, mykthread->kthread_idx);
 	perthread_store(mykthread, mykthread);
-
+	log_debug("kthread %d: initialized", mykthread->kthread_idx);
 	return 0;
 }
 
@@ -326,4 +326,13 @@ int kthread_init(void)
 	if (ksched_fd < 0)
 		return -errno;
 	return 0;
+}
+
+/**
+ * log_get_kthread_id - weak hook for logging kthread ID
+ */
+int log_get_kthread_id(void)
+{
+	struct kthread *k = myk();
+	return k ? k->kthread_idx : -1;
 }
