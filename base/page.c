@@ -353,7 +353,6 @@ int page_init(void)
 	void *addr;
 	int i;
 
-	log_debug("page_init: reserving virtual address space for page table");
 
 	/* First reserve address-space for the page table. */
 	addr = mmap(NULL, LGPAGE_META_LEN * NNUMA + PGSIZE_2MB - 1, PROT_NONE,
@@ -363,18 +362,15 @@ int page_init(void)
 		return -ENOMEM;
 	}
 
-	log_debug("page_init: reserved raw address = %p", addr);
 
 	/* Align to the next 2MB boundary. */
 	addr = (void *)align_up((uintptr_t)addr, PGSIZE_2MB);
-	log_debug("page_init: aligned address to 2MB boundary = %p", addr);
 
 	/* Then map NUMA-local large pages on top. */
 	for (i = 0; i < numa_count; i++) {
 		node = &lgpage_nodes[i];
 
 		void *region_start = (char *)addr + i * LGPAGE_META_LEN;
-		log_debug("page_init: mapping large pages for NUMA node %d at %p", i, region_start);
 
 		node->tbl = mem_map_anom(region_start,
 		                         LGPAGE_META_NR_LGPAGES * PGSIZE_2MB,
@@ -388,11 +384,9 @@ int page_init(void)
 		list_head_init(&node->pages);
 		node->idx = 0;
 
-		log_debug("page_init: successfully initialized lgpage_node[%d], tbl = %p", i, node->tbl);
 	}
 
 	page_tbl = addr;
-	log_debug("page_init: completed, page_tbl base = %p", page_tbl);
 	return 0;
 }
 

@@ -180,6 +180,7 @@ void tcp_rx_conn(struct trans_entry *e, struct mbuf *m)
 	uint32_t seq, ack, len, snd_nxt, hdr_len, win;
 	bool do_ack = false, slow_path;
 
+	log_debug("tcp_rx_conn: %u <== %u", c->e.laddr.port, c->e.raddr.port);
 	list_head_init(&q);
 	snd_nxt = load_acquire(&c->pcb.snd_nxt);
 
@@ -236,9 +237,11 @@ void tcp_rx_conn(struct trans_entry *e, struct mbuf *m)
 	/* Does the ack land outside snd_nxt? */
 	slow_path |= wraps_gt(ack, snd_nxt);
 
-	if (unlikely(slow_path))
+	if (unlikely(slow_path)){
+		log_debug("SLOW PATH");
 		return __tcp_rx_conn(c, m, ack, snd_nxt, win, optp, optlen);
-
+	}
+	log_debug("FAST PATH");
 	STAT(RX_TCP_IN_ORDER)++;
 
 	/* process acks and update send window */
@@ -285,6 +288,7 @@ void tcp_rx_conn(struct trans_entry *e, struct mbuf *m)
 	spin_unlock_np(&c->lock);
 
 	/* deferred work (delayed until after the lock was dropped) */
+	log_debug("[0] Releasing RX thread %p", rx_th);
 	waitq_signal_finish(rx_th);
 	mbuf_list_free(&q);
 	if (do_ack)
@@ -348,6 +352,7 @@ static __noinline void
 __tcp_rx_conn(tcpconn_t *c, struct mbuf *m, uint32_t ack, uint32_t snd_nxt,
 	      uint32_t win, const unsigned char *optp, int optlen)
 {
+	// log_debug("__tcp_rx_conn");
 	struct list_head q, waiters;
 	thread_t *rx_th = NULL;
 	struct mbuf *retransmit = NULL;
@@ -492,8 +497,10 @@ __tcp_rx_conn(tcpconn_t *c, struct mbuf *m, uint32_t ack, uint32_t snd_nxt,
 		do_ack = true;
 		goto done;
 	}
-	if (snd_was_full && !tcp_is_snd_full(c))
+	if (snd_was_full && !tcp_is_snd_full(c)){
+		log_debug("	snd_wnd has space, getting TX threads");
 		waitq_release_start(&c->tx_wq, &waiters);
+	}
 
 	/*
 	 * Fast retransmit -> detect a duplicate ACK if:
@@ -553,6 +560,7 @@ __tcp_rx_conn(tcpconn_t *c, struct mbuf *m, uint32_t ack, uint32_t snd_nxt,
 		if (wake) {
 			assert(!list_empty(&c->rxq));
 			assert(do_drop == false);
+			// log_debug("	Getting RX thread");
 			rx_th = waitq_signal(&c->rx_wq, &c->lock);
 		}
 		if (++c->acks_delayed_cnt >= 2) {
@@ -589,13 +597,19 @@ done:
 	spin_unlock_np(&c->lock);
 
 	/* deferred work (delayed until after the lock was dropped) */
+
+	log_debug("Releasing TX threads");
 	waitq_release_finish(&waiters);
-	if (rx_th)
+	if (rx_th){
+		log_debug("[1] Releasing RX thread %p", rx_th);
 		waitq_signal_finish(rx_th);
+	}
 	mbuf_list_free(&q);
 	tcp_tx_fast_retransmit_finish(c, retransmit);
-	if (do_ack)
+	if (do_ack){
+		log_debug("Sending ACK");
 		tcp_tx_ack(c);
+	}
 	if (do_drop)
 		mbuf_free(m);
 }
@@ -701,6 +715,9 @@ void tcp_rx_closed(struct mbuf *m)
 
 	r.ip = ntoh32(iphdr->saddr);
 	r.port = ntoh16(tcphdr->sport);
+
+
+	log_debug("tcp_rx_closed: %u <== %u", l.port, r.port);
 
 	if ((tcphdr->flags & TCP_ACK) > 0) {
 		tcp_tx_raw_rst(l, r, ntoh32(tcphdr->ack));

@@ -1235,8 +1235,9 @@ fn run_shortflow_client(
         let wg = wg.clone();
         let stats = stats.clone();
         let client_port = 30000 + i as u16;
-        eprintln!("Spawning thread {} for client port {}", i, client_port);
+        eprintln!("[Main thread] Spawning thread for client {}", client_port);
         backend.spawn_thread(move || {
+            eprintln!("[client {}] START", client_port);
             let mut buffer = vec![0u8; 4096];
             let mut payload = Vec::with_capacity(4096);
             let mut rng = rand::thread_rng();
@@ -1266,11 +1267,24 @@ fn run_shortflow_client(
                     proto.gen_req(0, &packet, &mut payload);
 
                     let send_time = Instant::now();
+                    // Print payload as UTF-8 string if possible, otherwise as hex
+                    // match std::str::from_utf8(&payload) {
+                    //     Ok(s) => eprintln!("[client {}] writing payload (utf8): {}", client_port, s),
+                    //     Err(_) => eprintln!("[client {}] writing payload (hex): {}", client_port, 
+                    //         payload.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ")),
+                    // }
+                    #[cfg(feature = "log-debug")]
+                    eprintln!("[client {}] write_all()", client_port);
                     if let Err(_) = conn.write_all(&payload) {
                         // continue;
                     }
 
+                    #[cfg(feature = "log-debug")]
+                    eprintln!("[client {}] read_response()", client_port);
                     let _ = proto.read_response(&conn, &mut buf);
+                    #[cfg(feature = "log-debug")]
+                    eprintln!("[client {}] read_response() DONE", client_port);
+                    
                     let recv_time = Instant::now();
                     let latency_us = (recv_time - send_time).as_micros() as u64;
 
@@ -1280,6 +1294,7 @@ fn run_shortflow_client(
             // }
 
             wg.done();
+            eprintln!("client {} DONE", client_port);
         });
     }
 
@@ -1288,12 +1303,16 @@ fn run_shortflow_client(
         let stop_flag = stop_flag.clone();
         eprintln!("Spawning stopper thread");
         backend.spawn_thread(move || {
+            eprintln!("Stopper thread started (sleep for {:?})", runtime);
             backend.sleep(runtime);
+            eprintln!("Stopper thread timer triggered => setting stop flag");
             stop_flag.store(true, Ordering::Relaxed);
         });
     }
 
+    eprintln!("wg.add({})", nthreads);
     wg.add(nthreads as i32);
+    eprintln!("wg.wait()");
     wg.wait();
 
     // Output stats
@@ -2824,7 +2843,7 @@ fn main() {
         "linux-client" | "runtime-client" => {
             let matches = matches.clone();
             backend.init_and_run(config, move || {
-
+                eprintln!("Main thread started");
                 let mut barrier_group = match (matches.is_present("leader"), matches.value_of("leader-ip")) {
                     (true, _) => {
                         let addr =  SocketAddrV4::new(FromStr::from_str("0.0.0.0").unwrap(), 23232);

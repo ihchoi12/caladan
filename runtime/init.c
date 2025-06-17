@@ -93,10 +93,10 @@ static int run_init_handlers(const char *phase,
 
 	log_debug("entering '%s' init phase", phase);
 	for (i = 0; i < nr; i++) {
-		log_debug("[runtime] init -> %s", h[i].name);
+		// log_debug("	init -> %s", h[i].name);
 		ret = h[i].init();
 		if (ret) {
-			log_debug("failed, ret = %d", ret);
+			log_debug("	failed, ret = %d", ret);
 			return ret;
 		}
 	}
@@ -106,6 +106,7 @@ static int run_init_handlers(const char *phase,
 
 static int runtime_init_thread(void)
 {
+	log_debug("runtime_init_thread()");
 	int ret;
 
 	ret = base_init_thread();
@@ -133,7 +134,7 @@ static void *pthread_entry(void *data)
 
 	pthread_barrier_wait(&init_barrier);
 	pthread_barrier_wait(&init_barrier);
-	log_debug("	pthread_entry: sched_start()");
+	log_debug("KTH 0 registered with iokernel, sched_start()");
 	sched_start();
 
 	/* never reached unless things are broken */
@@ -165,7 +166,7 @@ int runtime_set_initializers(initializer_fn_t global_fn,
  */
 int runtime_init(const char *cfgpath, thread_fn_t main_fn, void *arg)
 {
-	log_debug("START runtime_init");
+	log_debug("START runtime_init()");
 	pthread_t tid[NCPU];
 	int ret, i;
 
@@ -180,17 +181,19 @@ int runtime_init(const char *cfgpath, thread_fn_t main_fn, void *arg)
 		log_err("base library global init failed, ret = %d", ret);
 		return ret;
 	}
+	log_debug("\n\n\n");
 
 	ret = cfg_load(cfgpath);
 	if (ret)
 		return ret;
 
 	log_info("process pid: %u", getpid());
-
+	log_debug("\n\n\n");
 	pthread_barrier_init(&init_barrier, NULL, maxks);
 
 	ret = run_init_handlers("global", global_init_handlers,
 				ARRAY_SIZE(global_init_handlers));
+	log_debug("\n\n\n");
 	if (ret)
 		return ret;
 
@@ -204,15 +207,15 @@ int runtime_init(const char *cfgpath, thread_fn_t main_fn, void *arg)
 
 	ret = runtime_init_thread();
 	BUG_ON(ret);
-
-	log_info("spawning %d kthreads", maxks);
+	log_debug("\n\n\n");
+	log_info("spawning %d kthreads", maxks-1);
 	for (i = 1; i < maxks; i++) {
 		ret = pthread_create(&tid[i], NULL, pthread_entry, NULL);
 		BUG_ON(ret);
 	}
 
 	pthread_barrier_wait(&init_barrier);
-
+	log_debug("\n\n\n ALL kthreads initialized, registering with iokernel");
 	ret = ioqueues_register_iokernel();
 	if (ret) {
 		log_err("couldn't register with iokernel, ret = %d", ret);
@@ -220,12 +223,13 @@ int runtime_init(const char *cfgpath, thread_fn_t main_fn, void *arg)
 	}
 
 	pthread_barrier_wait(&init_barrier);
-
+	log_debug("Registered with iokernel");
 	/* point of no return starts here */
 
 	ret = thread_spawn_main(main_fn, arg);
 	BUG_ON(ret);
 
+	log_debug("\n\n\n");
 	ret = run_init_handlers("late", late_init_handlers,
 				ARRAY_SIZE(late_init_handlers));
 	BUG_ON(ret);

@@ -220,7 +220,7 @@ static struct trans_entry *trans_lookup(struct mbuf *m, bool reverse)
  */
 void net_rx_trans(struct mbuf *m)
 {
-	log_debug("net_rx_trans");
+	// log_debug("net_rx_trans");
 	const struct ip_hdr *iphdr;
 	struct trans_entry *e;
 
@@ -230,6 +230,7 @@ void net_rx_trans(struct mbuf *m)
 	rcu_read_lock();
 	e = trans_lookup(m, false);
 	if (unlikely(!e)) {
+		log_debug("no matching transport socket for this pkt");
 		rcu_read_unlock();
 		iphdr = mbuf_network_hdr(m, *iphdr);
 		if (iphdr->proto == IPPROTO_TCP)

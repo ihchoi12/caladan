@@ -84,7 +84,6 @@ pid_t thread_gettid(void)
  */
 int thread_init_perthread(void)
 {
-	log_debug("START thread_init_perthread");
 	int ret;
 	unsigned int thread_id;
 
@@ -115,6 +114,6 @@ int thread_init_perthread(void)
 
 	perthread_store(thread_id, thread_id);
 
-	log_info("thread: created thread %d", thread_id);
+	log_info("thread_init_perthread(kthread %d)", thread_id);
 	return 0;
 }

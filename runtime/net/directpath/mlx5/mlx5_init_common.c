@@ -54,24 +54,30 @@ static void mlx5_softirq_strided(void *arg)
 			net_rx_batch(ms, cnt);
 		preempt_disable();
 		v->poll_th = thread_self();
+		log_debug("mlx5_softirq_strided() parking");
 		thread_park_and_preempt_enable();
+		log_debug("mlx5_softirq_strided() unparked");
 	}
 }
 
 static void mlx5_softirq(void *arg)
 {
-	log_debug("mlx5_softirq");
+	log_debug("mlx5_softirq() start");
 	int cnt;
 	struct mlx5_rxq *v = arg;
 	struct mbuf *ms[RUNTIME_RX_BATCH_SIZE];
 
 	while (true) {
 		cnt = mlx5_gather_rx(v, ms, RUNTIME_RX_BATCH_SIZE);
-		if (cnt)
+		if (cnt){
+			log_debug("RX %u pkts", cnt);
 			net_rx_batch(ms, cnt);
+		}
 		preempt_disable();
 		v->poll_th = thread_self();
+		log_debug("mlx5_softirq() parking");
 		thread_park_and_preempt_enable();
+		log_debug("mlx5_softirq() unparked");
 	}
 }
 
@@ -101,6 +107,7 @@ bool mlx5_rx_poll_locked(unsigned int q_index)
 	if (!__sync_bool_compare_and_swap(&v->poll_th, th, NULL))
 		return false;
 
+	log_debug("mlx5_rx_poll_locked: pending pkts in rxq %u  => mlx5_softirq is ready", q_index);
 	thread_ready_locked(th);
 	return true;
 }
@@ -117,7 +124,7 @@ static struct net_driver_ops mlx5_default_net_ops = {
 
 int mlx5_init_thread(void)
 {
-	log_debug("START mlx5_init_thread");
+	// log_debug("START mlx5_init_thread");
 	int ret;
 	struct kthread *k = myk();
 	struct hardware_queue_spec *hs;
@@ -128,7 +135,7 @@ int mlx5_init_thread(void)
 	if (cfg_directpath_strided)
 		v->poll_th = thread_create(mlx5_softirq_strided, v);
 	else{
-		log_debug("	thread_create(mlx5_softirq)");
+		log_debug("Creating mlx5_softirq uthread for kthread %d", k->kthread_idx);
 		v->poll_th = thread_create(mlx5_softirq, v);
 	}
 	if (!v->poll_th)

@@ -368,8 +368,10 @@ void waitgroup_add(waitgroup_t *wg, int cnt)
 	spin_lock_np(&wg->lock);
 	wg->cnt += cnt;
 	BUG_ON(wg->cnt < 0);
-	if (wg->cnt == 0)
+	if (wg->cnt == 0){
+		log_debug("All worker threads DONE, ready waiting threads", wg);
 		list_append_list(&tmp, &wg->waiters);
+	}
 	spin_unlock_np(&wg->lock);
 
 	while (true) {

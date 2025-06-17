@@ -164,6 +164,7 @@ done:
 
 static void stat_tcp_server(void *arg)
 {
+	log_debug("stat_tcp_server()");
 	struct netaddr laddr;
 	tcpconn_t *c;
 	tcpqueue_t *q;
@@ -176,6 +177,7 @@ static void stat_tcp_server(void *arg)
 	BUG_ON(ret);
 
 	while (true) {
+		log_debug("tcp_accept()");
 		ret = tcp_accept(q, &c);
 		BUG_ON(ret);
 		ret = thread_spawn(stat_tcp_worker, c);
@@ -185,6 +187,7 @@ static void stat_tcp_server(void *arg)
 
 static void stat_worker_udp(void *arg)
 {
+	log_debug("stat_worker_udp()");
 	const size_t cmd_len = strlen("stat");
 	size_t payload_size = udp_get_payload_size();
 	char buf[payload_size];
@@ -227,12 +230,12 @@ static void stat_worker_udp(void *arg)
  */
 int stat_init_late(void)
 {
-	log_debug("stat_init_late()");
+	// log_debug("stat_init_late()");
 	int ret;
-
+	log_debug("Spawning stat_tcp_server uthread");
 	ret = thread_spawn(stat_tcp_server, NULL);
 	if (ret)
 		return ret;
-
+	log_debug("Spawning stat_worker_udp uthread");
 	return thread_spawn(stat_worker_udp, NULL);
 }

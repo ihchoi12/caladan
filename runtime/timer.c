@@ -208,6 +208,7 @@ bool __timer_cancel(struct timer_entry *e)
 static void timer_finish_sleep(unsigned long arg)
 {
 	thread_t *th = (thread_t *)arg;
+	log_debug("timer_finish_sleep() ==> __timer_sleep() is ready");
 	thread_ready(th);
 }
 
@@ -223,8 +224,9 @@ static void __timer_sleep(uint64_t deadline_us)
 	putk();
 	timer_start_locked(&e, deadline_us);
 	update_q_ptrs(k);
+	log_debug("__timer_sleep parking");
 	thread_park_and_unlock_np(&k->timer_lock);
-
+	log_debug("__timer_sleep unparked");
 	timer_finish(&e);
 }
 
@@ -246,11 +248,13 @@ void timer_sleep_until(uint64_t deadline_us)
  */
 void timer_sleep(uint64_t duration_us)
 {
+	log_debug("timer_sleep() for %lu us", duration_us);
 	__timer_sleep(microtime() + duration_us);
 }
 
 static void timer_softirq_one(struct kthread *k)
 {
+	log_debug("timer_softirq_one() called");
 	struct timer_entry *e;
 	uint64_t now_us;
 	int i;
@@ -291,7 +295,9 @@ static void timer_softirq(void *arg)
 		preempt_disable();
 		timer_softirq_one(k);
 		k->timer_busy = false;
+		log_debug("timer_softirq() parking");
 		thread_park_and_preempt_enable();
+		log_debug("timer_softirq() unparked");
 	}
 }
 
@@ -310,7 +316,7 @@ int timer_init_thread(void)
 				 CACHE_LINE_SIZE));
 	if (!k->timers)
 		return -ENOMEM;
-
+	log_debug("Creating timer_softirq uthread", k->kthread_idx);
 	th = thread_create(timer_softirq, k);
 	if (!th)
 		return -ENOMEM;

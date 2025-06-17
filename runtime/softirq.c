@@ -50,6 +50,7 @@ bool softirq_run_locked(struct kthread *k)
 	/* check for iokernel softirq work */
 	if (!k->iokernel_busy && softirq_iokernel_pending(k)) {
 		k->iokernel_busy = true;
+		log_debug("Pending LRPC from iokernel => iokernel_softirq is ready");
 		thread_ready_head_locked(k->iokernel_softirq);
 		work_done = true;
 	}
@@ -60,6 +61,7 @@ bool softirq_run_locked(struct kthread *k)
 	/* check for timer softirq work */
 	if (!k->timer_busy && softirq_timer_pending(k, now_tsc)) {
 		k->timer_busy = true;
+		log_debug("Pending timer softirq => timer_softirq is ready");
 		thread_ready_head_locked(k->timer_softirq);
 		work_done = true;
 	}
@@ -67,6 +69,7 @@ bool softirq_run_locked(struct kthread *k)
 	/* check for storage softirq work */
 	if (!k->storage_busy && storage_available_completions(k)) {
 		k->storage_busy = true;
+		log_debug("Pending storage completions => storage_softirq is ready");
 		thread_ready_head_locked(k->storage_softirq);
 		work_done = true;
 	}

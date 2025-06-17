@@ -118,6 +118,7 @@ static void tcp_handle_timeouts(tcpconn_t *c, uint64_t now)
 /* a periodic background thread that handles timeout events */
 static void tcp_worker(void *arg)
 {
+	log_debug("tcp_worker()");
 	tcpconn_t *c, *c_next;
 	uint64_t now;
 
@@ -129,7 +130,9 @@ static void tcp_worker(void *arg)
 
 		if (unlikely(list_empty(&tcp_conns))) {
 			tcp_worker_th = thread_self();
+			log_debug("tcp_worker() parking");
 			thread_park_and_unlock_np(&tcp_lock);
+			log_debug("tcp_worker() unparked");
 			continue;
 		}
 
@@ -145,8 +148,10 @@ static void tcp_worker(void *arg)
 		}
 		spin_unlock_np(&tcp_lock);
 
-		if (!again)
+		if (!again){
+			log_debug("tcp_worker() sleeping 500 us");
 			timer_sleep(500 * ONE_US);
+		}
 	}
 }
 
@@ -230,9 +235,9 @@ void tcp_conn_set_state(tcpconn_t *c, int new_state)
 	/* unblock any threads waiting for the connection to be established */
 	if (c->pcb.state < TCP_STATE_ESTABLISHED &&
 	    new_state >= TCP_STATE_ESTABLISHED) {
+		log_debug("ESTABLISHED ==> Releasing TX threads");
 		waitq_release(&c->tx_wq);
 	}
-
 	tcp_debug_state_change(c, c->pcb.state, new_state);
 	c->pcb.state = new_state;
 	tcp_timer_update(c);
@@ -363,17 +368,17 @@ int tcp_conn_attach(tcpconn_t *c, struct netaddr laddr, struct netaddr raddr)
 	else if (laddr.ip != netcfg.addr)
 		return -EINVAL;
 
-	log_debug("trans_init_5tuple()");
+	// log_debug("trans_init_5tuple()");
 	trans_init_5tuple(&c->e, IPPROTO_TCP, &tcp_conn_ops, laddr, raddr);
 	
 	
 	if (laddr.port == 0){
 		ret = trans_table_add_with_ephemeral_port(&c->e);
-		log_debug("[0] laddr.port = %d", laddr.port);
+		// log_debug("[0] laddr.port = %d", laddr.port);
 	}
 	else{
 		ret = trans_table_add(&c->e);
-		log_debug("[1] laddr.port = %d", laddr.port);
+		// log_debug("[1] laddr.port = %d", laddr.port);
 	}
 	if (ret)
 		return ret;
@@ -383,8 +388,10 @@ int tcp_conn_attach(tcpconn_t *c, struct netaddr laddr, struct netaddr raddr)
 	list_add_tail(&tcp_conns, &c->global_link);
 	spin_unlock_np(&tcp_lock);
 
-	if (th)
+	if (th){
+		log_debug("Wake up tcp_worker()");
 		thread_ready(th);
+	}
 
 	c->attach_ts = microtime();
 
@@ -456,6 +463,7 @@ static void tcp_queue_recv(struct trans_entry *e, struct mbuf *m)
 	tcpqueue_t *q = container_of(e, tcpqueue_t, e);
 	tcpconn_t *c;
 	thread_t *th;
+	log_debug("tcp_queue_recv: %u <== %u", c->e.laddr.port, c->e.raddr.port);
 
 	/* make sure the connection queue isn't full */
 	spin_lock_np(&q->l);
@@ -480,6 +488,7 @@ static void tcp_queue_recv(struct trans_entry *e, struct mbuf *m)
 	list_add_tail(&q->conns, &c->queue_link);
 	th = waitq_signal(&q->wq, &q->l);
 	spin_unlock_np(&q->l);
+	log_debug("tcp_queue_recv(): releasing thread %p", th);
 	waitq_signal_finish(th);
 
 done:
@@ -577,7 +586,9 @@ int tcp_accept(tcpqueue_t *q, tcpconn_t **c_out)
 			spin_unlock_np(&q->l);
 			return -EAGAIN;
 		}
+		log_debug("tcp_accept() waiting");
 		waitq_wait(&q->wq, &q->l);
+		log_debug("tcp_accept() waiting finished");
 	}
 
 	/* was the queue drained and shutdown? */
@@ -658,7 +669,7 @@ void tcp_qclose(tcpqueue_t *q)
 static int __tcp_dial(struct netaddr laddr, struct netaddr raddr,
 	                  tcpconn_t **c_out, bool nonblocking)
 {
-	log_debug("tcp: dialing port %d:%d", raddr.ip, raddr.port);
+	// log_debug("tcp: dialing port %d:%d", raddr.ip, raddr.port);
 	struct tcp_options opts;
 	tcpconn_t *c;
 	int ret;
@@ -669,7 +680,7 @@ static int __tcp_dial(struct netaddr laddr, struct netaddr raddr,
 		return -ENOMEM;
 
 	c->nonblocking = nonblocking;
-	log_debug("tcp: connection is %s", c->nonblocking ? "nonblocking" : "blocking");
+	// log_debug("tcp: connection is %s", c->nonblocking ? "nonblocking" : "blocking");
 
 	/* rewrite loopback address */
 	if (raddr.ip == MAKE_IP_ADDR(127, 0, 0, 1))
@@ -679,7 +690,7 @@ static int __tcp_dial(struct netaddr laddr, struct netaddr raddr,
 	 * Attach the connection to the transport layer. From this point onward
 	 * ingress packets can be dispatched to the connection.
 	 */
-	log_debug("tcp_conn_attach()");
+	// log_debug("tcp_conn_attach()");
 	ret = tcp_conn_attach(c, laddr, raddr);
 	if (unlikely(ret)) {
 		sfree(c);
@@ -707,16 +718,17 @@ static int __tcp_dial(struct netaddr laddr, struct netaddr raddr,
 		*c_out = c;
 		return -EINPROGRESS;
 	}
-	log_debug("Wait START");
+	log_debug("__tcp_dial() waiting");
 	/* wait until the connection is established or there is a failure */
 	while (!c->tx_closed && c->pcb.state < TCP_STATE_ESTABLISHED)
 		waitq_wait(&c->tx_wq, &c->lock);
-	log_debug("Wait DONE");
+	log_debug("__tcp_dial waiting finished (local: %u, remote: %u ESTABLISHED)", c->e.laddr.port, c->e.raddr.port);
 	/* check if the connection failed */
 	if (c->tx_closed) {
 		ret = -c->err;
 		spin_unlock_np(&c->lock);
 		tcp_conn_destroy(c);
+		log_debug("CONN FAILED");
 		return ret;
 	}
 	spin_unlock_np(&c->lock);
@@ -854,7 +866,13 @@ static ssize_t tcp_read_wait(tcpconn_t *c, size_t len,
 			spin_unlock_np(&c->lock);
 			return -EAGAIN;
 		}
+		log_debug("tcp_read_wait(%zu bytes) waiting (rx_closed: %s, rx_exclusive: %s, rxq_empty: %s)",
+				  len,
+				  c->rx_closed ? "true" : "false",
+				  c->rx_exclusive ? "true" : "false",
+				  list_empty(&c->rxq) ? "true" : "false");
 		waitq_wait(&c->rx_wq, &c->lock);
+		log_debug("tcp_read_wait() waiting finished");
 	}
 
 	/* is the socket closed? */
@@ -894,8 +912,10 @@ static ssize_t tcp_read_wait(tcpconn_t *c, size_t len,
 	}
 	spin_unlock_np(&c->lock);
 
-	if (do_ack)
+	if (do_ack){
+		log_debug("tcp_read_wait() sending ACK");
 		tcp_tx_ack(c);
+	}
 	return readlen;
 }
 
@@ -1070,7 +1090,9 @@ static int tcp_write_wait(tcpconn_t *c, size_t *winlen)
 			spin_unlock_np(&c->lock);
 			return -EAGAIN;
 		}
+		log_debug("tcp_write_wait() waiting");
 		waitq_wait(&c->tx_wq, &c->lock);
+		log_debug("tcp_write_wait() waiting finished");
 	}
 	c->zero_wnd = false;
 
@@ -1093,6 +1115,7 @@ static int tcp_write_wait(tcpconn_t *c, size_t *winlen)
 
 static void tcp_write_finish(tcpconn_t *c)
 {
+	log_debug("tcp_write_finish()");
 	struct list_head q;
 	struct list_head waiters;
 	struct mbuf *retransmit = NULL;
@@ -1140,11 +1163,13 @@ static void tcp_write_finish(tcpconn_t *c)
  */
 ssize_t tcp_write(tcpconn_t *c, const void *buf, size_t len)
 {
+	log_debug("tcp_write(%zu bytes)", len);
 	size_t winlen;
 	ssize_t ret;
 
 	/* block until the data can be sent */
 	ret = tcp_write_wait(c, &winlen);
+	log_debug("tcp_write() unblocked");
 	if (ret)
 		return ret;
 
@@ -1202,8 +1227,10 @@ static void tcp_retransmit(void *arg)
 
 	spin_lock_np(&c->lock);
 
+	log_debug("tcp_retransmit() waiting");
 	while (c->tx_exclusive && c->pcb.state != TCP_STATE_CLOSED)
 		waitq_wait(&c->tx_wq, &c->lock);
+	log_debug("tcp_retransmit() waiting finished");
 
 	if (c->pcb.state != TCP_STATE_CLOSED) {
 		c->tx_exclusive = true;
@@ -1286,8 +1313,10 @@ static int tcp_conn_shutdown_tx(tcpconn_t *c)
 		return 0;
 	}
 
+	log_debug("tcp_conn_shutdown_tx() waiting");
 	while (c->tx_exclusive)
 		waitq_wait(&c->tx_wq, &c->lock);
+	log_debug("tcp_conn_shutdown_tx() waiting finished");
 	ret = tcp_tx_ctl(c, TCP_FIN | TCP_ACK, NULL);
 	if (unlikely(ret))
 		return ret;
@@ -1356,8 +1385,10 @@ void tcp_abort(tcpconn_t *c)
 	r = c->e.raddr;
 	tcp_conn_fail(c, ECONNABORTED);
 
+	log_debug("tcp_abort() waiting");
 	while (c->tx_exclusive)
 		waitq_wait(&c->tx_wq, &c->lock);
+	log_debug("tcp_abort() waiting finished");
 
 	snd_nxt = c->pcb.snd_nxt;
 	spin_unlock_np(&c->lock);
@@ -1414,5 +1445,6 @@ void tcpq_set_nonblocking(tcpqueue_t *q, bool nonblocking)
  */
 int tcp_init_late(void)
 {
+	log_debug("Spawning tcp_worker uthread");
 	return thread_spawn(tcp_worker, NULL);
 }

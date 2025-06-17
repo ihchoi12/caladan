@@ -7,6 +7,7 @@
 #include <asm/atomic.h>
 #include <asm/ops.h>
 #include <base/stddef.h>
+#include <base/log.h>
 
 typedef void (*timer_fn_t)(unsigned long arg);
 
@@ -35,6 +36,7 @@ struct timer_entry {
 static inline void
 timer_init(struct timer_entry *e, timer_fn_t fn, unsigned long arg)
 {
+	// log_debug("timer_init: %p, fn %p, arg %lu", e, fn, arg);//HERE
 	e->armed = false;
 	e->executing = false;
 	e->fn = fn;

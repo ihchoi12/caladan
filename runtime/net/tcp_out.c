@@ -230,7 +230,7 @@ int tcp_tx_ctl(tcpconn_t *c, uint8_t flags, const struct tcp_options *opts)
 
 	BUG_ON(!c->tx_exclusive && !spin_lock_held(&c->lock));
 
-	log_debug("net_tx_alloc_mbuf()");
+	// log_debug("net_tx_alloc_mbuf()");
 	m = net_tx_alloc_mbuf();
 	if (unlikely(!m))
 		return -ENOMEM;
@@ -254,7 +254,7 @@ int tcp_tx_ctl(tcpconn_t *c, uint8_t flags, const struct tcp_options *opts)
 	uint32_t ip_host_order = ntohl(c->e.raddr.ip);
 	inet_ntop(AF_INET, &ip_host_order, ip_str, sizeof(ip_str));
 	
-	log_debug("net_tx_ip() the mbuf to %s (TCP)", ip_str);
+	// log_debug("net_tx_ip() the mbuf to %s (TCP)", ip_str);
 	ret = net_tx_ip(m, IPPROTO_TCP, c->e.raddr.ip);
 	if (unlikely(ret)) {
 		/* pretend the packet was sent */

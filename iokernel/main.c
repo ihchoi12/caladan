@@ -183,6 +183,7 @@ static void print_usage(void)
 
 int main(int argc, char *argv[])
 {
+	log_debug("main() START");
 	int i, ret;
 
 	if (getuid() != 0) {

@@ -137,6 +137,7 @@ static LIST_HEAD(flow_to_deregister);
 
 static void flow_registration_worker(void *arg)
 {
+	log_debug("flow_registration_worker()");
 	int ret;
 	struct flow_registration *f;
 
@@ -160,7 +161,9 @@ static void flow_registration_worker(void *arg)
 		}
 
 		flow_worker_th = thread_self();
+		log_debug("flow_registration_worker() parking");
 		thread_park_and_unlock_np(&flow_worker_lock);
+		log_debug("flow_registration_worker() unparked");
 	}
 }
 
@@ -209,7 +212,7 @@ int directpath_init_late(void)
 
 	if (cfg_directpath_mode != DIRECTPATH_MODE_FLOW_STEERING)
 		return 0;
-
+	log_debug("Spawning flow_registration_worker uthread");
 	return thread_spawn(flow_registration_worker, NULL);
 }
 

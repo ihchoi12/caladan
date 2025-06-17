@@ -302,7 +302,7 @@ void kthread_wait_to_attach(void)
 	struct kthread *k = myk();
 	int s;
 
-	log_debug("kthread %d: hey ksched, I'm Waiting for a core", k->kthread_idx);
+	log_debug("Hey ksched, I'm Waiting for a core");
 	do {
 		s = ioctl(ksched_fd, KSCHED_IOC_START, 0);
 	} while (s < 0);
@@ -311,7 +311,7 @@ void kthread_wait_to_attach(void)
 
 	/* attach the kthread for the first time */
 	atomic_inc(&runningks);
-	log_debug("kthread %d got core %d (%d active kthreads)", k->kthread_idx, s, atomic_read(&runningks));
+	log_debug("Got core %d (%d active kthreads)", s, atomic_read(&runningks));
 	flows_notify_waking();
 }
 

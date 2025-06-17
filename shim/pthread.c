@@ -32,7 +32,9 @@ static void thread_trampoline(void *arg)
 		thread_ready(j->waiter);
 	}
 	j->waiter = thread_self();
+	log_debug("thread_trampoline() parking");
 	thread_park_and_unlock_np(&j->lock);
+	log_debug("thread_trampoline() unparked");
 }
 
 static int thread_spawn_joinable(struct join_handle **handle,
@@ -81,7 +83,9 @@ static int thread_join(struct join_handle *j, void **retval)
 	}
 	if (j->waiter == NULL) {
 		j->waiter = thread_self();
+		log_debug("thread_join() parking");
 		thread_park_and_unlock_np(&j->lock);
+		log_debug("thread_join() unparked");
 		spin_lock_np(&j->lock);
 	}
 	if (retval)

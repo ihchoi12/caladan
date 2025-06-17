@@ -75,7 +75,7 @@ static inline void *tcache_alloc(struct tcache_perthread *ltc)
 
 	ltc->rounds--;
 	ltc->loaded = ltc->loaded->next_item;
-	log_debug("tcache_alloc: %p", item);
+	// log_debug("tcache_alloc: %p", item);
 	return item;
 }
 

@@ -75,7 +75,7 @@ static inline bool cores_have_affinity(unsigned int cpua, unsigned int cpub)
  */
 static __noreturn void jmp_thread(thread_t *th)
 {
-	log_debug("	jmp_thread: %p (core %d -> %d)", th, th->last_cpu, myk()->curr_cpu);
+	log_debug("	jmp_thread to %p (core %d -> %d)", th, th->last_cpu, myk()->curr_cpu);
 	assert_preempt_disabled();
 	assert(th->thread_ready);
 
@@ -87,7 +87,9 @@ static __noreturn void jmp_thread(thread_t *th)
 			cpu_relax();
 	}
 	th->thread_running = true;
+	// log_debug("__jmp_thread() start");
 	__jmp_thread(&th->tf);
+	// log_debug("__jmp_thread() done");
 }
 
 /**
@@ -156,6 +158,7 @@ static void drain_overflow(struct kthread *l)
 		if (!th)
 			break;
 		l->rq[l->rq_head++ % RUNTIME_RQ_SIZE] = th;
+		log_debug("drain_overflow: moved thread %p to runqueue (rq_head: %u, rq_tail: %u)", th, l->rq_head, l->rq_tail);
 	}
 }
 
@@ -182,7 +185,7 @@ static void update_oldest_tsc(struct kthread *k)
 	if (load_acquire(&k->rq_head) != k->rq_tail) {
 		th = k->rq[k->rq_tail % RUNTIME_RQ_SIZE];
 		ACCESS_ONCE(k->q_ptrs->oldest_tsc) = th->ready_tsc;
-		log_debug("	update oldest_tsc to %lu", th->ready_tsc);
+		log_debug("	update oldest_tsc to %lu (rq_tail: %u)", th->ready_tsc, k->rq_tail);
 	}
 }
 
@@ -348,15 +351,14 @@ static __noreturn __noinline void schedule(void)
 	ACCESS_ONCE(l->q_ptrs->rcu_gen) = l->rcu_gen;
 	assert((l->rcu_gen & 0x1) == 0x0);
 
-	log_debug("kthread %d schedule(): RESCHEDULES=%lu, PROGRAM_CYCLES=%lu (+%lu), rcu_gen=%u",
+	log_debug("\n\n\nschedule(): RESCHEDULES=%lu, PROGRAM_CYCLES=%lu (+%lu), rcu_gen=%u",
 	          l->kthread_idx, l->curr_cpu,
 	          STAT(RESCHEDULES), STAT(PROGRAM_CYCLES),
 	          start_tsc - perthread_read_stable(last_tsc), l->rcu_gen);
 
 	/* check for pending preemption */
 	if (unlikely(preempt_cede_needed(l))) {
-		log_debug("	kthread %d (core %d) has pending preemption, park and cede to iokernel",
-		          l->kthread_idx, l->curr_cpu);
+		log_debug("	Has pending preemption, park and cede to iokernel");
 		l->parked = true;
 		spin_unlock(&l->lock);
 		kthread_park_now();
@@ -379,19 +381,20 @@ static __noreturn __noinline void schedule(void)
 	             cycles_per_us * RUNTIME_WATCHDOG_US)) {
 		l->last_softirq_tsc = start_tsc;
 		log_debug("	do_watchdog()");
-		if (do_watchdog(l))
+		if (do_watchdog(l)){
+			log_debug("	Handled softirqs, returning to schedule");
 			goto done;
+		}
 	}
 
 	/* move overflow tasks into the runqueue */
 	if (unlikely(!list_empty(&l->rq_overflow))){
-		log_debug("	drain_overflow()");
 		drain_overflow(l);
 	}
 
 	/* first try the local runqueue */
 	if (l->rq_head != l->rq_tail){
-		log_debug("	local runqueue has %u threads (rq_head: %u, rq_tail: %u)",
+		log_debug("	local RQ has %u uth (head: %u, tail: %u)",
 		        	l->rq_head - l->rq_tail, l->rq_head, l->rq_tail);
 		goto done;
 	}
@@ -405,7 +408,7 @@ again:
 
 	/* then check for local softirqs */
 	if (softirq_run_locked(l)) {
-		log_debug("	[0] local softirqs was scheduled");
+		log_debug("[0] local softirqs was scheduled");
 		STAT(SOFTIRQS_LOCAL)++;
 		goto done;
 	}
@@ -470,12 +473,12 @@ done:
 	assert(l->rq_head != l->rq_tail);
 	th = l->rq[l->rq_tail++ % RUNTIME_RQ_SIZE];
 	ACCESS_ONCE(l->q_ptrs->rq_tail)++;
-	log_debug("	schedule(): pop %p (core %d -> %d)", th, th->last_cpu, l->curr_cpu);
+	log_debug("	pop %p from RQ_tail (head: %u, tail: %u)", th, l->rq_head, l->rq_tail);
 
 	/* move overflow tasks into the runqueue */
 	if (unlikely(!list_empty(&l->rq_overflow)))
 		drain_overflow(l);
-	log_debug("	[1] update_oldest_tsc");
+	// log_debug("	[1] update_oldest_tsc");
 	update_oldest_tsc(l);
 	spin_unlock(&l->lock);
 
@@ -523,6 +526,7 @@ static __always_inline void enter_schedule(thread_t *curth)
 	    (!disable_watchdog &&
 	     unlikely(now_tsc - k->last_softirq_tsc >
 		      cycles_per_us * RUNTIME_WATCHDOG_US))) {
+		log_debug("jmp_runtime(schedule)");
 		jmp_runtime(schedule);
 		return;
 	}
@@ -534,11 +538,12 @@ static __always_inline void enter_schedule(thread_t *curth)
 	/* pop the next runnable thread from the queue */
 	th = k->rq[k->rq_tail++ % RUNTIME_RQ_SIZE];
 	ACCESS_ONCE(k->q_ptrs->rq_tail)++;
+	log_debug("	pop %p from RQ_tail (head: %u, tail: %u)", th, k->rq_head, k->rq_tail);
 
 	/* move overflow tasks into the runqueue */
 	if (unlikely(!list_empty(&k->rq_overflow)))
 		drain_overflow(k);
-	log_debug("[2] update_oldest_tsc");
+	// log_debug("[2] update_oldest_tsc");
 	update_oldest_tsc(k);
 	spin_unlock(&k->lock);
 
@@ -567,6 +572,7 @@ static __always_inline void enter_schedule(thread_t *curth)
 		STAT(LOCAL_RUNS)++;
 	else
 		STAT(REMOTE_RUNS)++;
+	log_debug("jmp_thread_direct(from %p to %p)", curth, th);
 	jmp_thread_direct(curth, th);
 }
 
@@ -640,8 +646,8 @@ void thread_ready_locked(thread_t *th)
 	}
 
 	k->rq[k->rq_head++ % RUNTIME_RQ_SIZE] = th;
-	log_debug("thread %p ready at %lu, rq_head %u, rq_tail %u",
-	          th, th->ready_tsc, k->rq_head, k->rq_tail);
+	log_debug("[locked] RQ normal %p (time %lu, head %u, tail %u)", th, th->ready_tsc, k->rq_head, k->rq_tail);
+ 
 	if (k->rq_head - k->rq_tail == 1)
 		ACCESS_ONCE(k->q_ptrs->oldest_tsc) = th->ready_tsc;
 	ACCESS_ONCE(k->q_ptrs->rq_head)++;
@@ -670,10 +676,13 @@ void thread_ready_head_locked(thread_t *th)
 	oldestth = k->rq[--k->rq_tail % RUNTIME_RQ_SIZE];
 	k->rq[k->rq_tail % RUNTIME_RQ_SIZE] = th;
 	if (unlikely(k->rq_head - k->rq_tail > RUNTIME_RQ_SIZE)) {
+		log_debug("Move RQ's head (%p) to RQ_overflow", oldestth);
 		list_add(&k->rq_overflow, &oldestth->link);
 		k->rq_head--;
 		STAT(RQ_OVERFLOW)++;
 	}
+	log_debug("RQ prioritize %p (time %lu, head %u, tail %u)", th, th->ready_tsc, k->rq_head, k->rq_tail);
+	
 	ACCESS_ONCE(k->q_ptrs->oldest_tsc) = th->ready_tsc;
 	ACCESS_ONCE(k->q_ptrs->rq_head)++;
 }
@@ -686,7 +695,6 @@ void thread_ready_head_locked(thread_t *th)
  */
 void thread_ready(thread_t *th)
 {
-	log_debug("thread_ready: %p (core %d)", th, myk()->curr_cpu);
 	struct kthread *k;
 	uint32_t rq_tail;
 
@@ -698,6 +706,7 @@ void thread_ready(thread_t *th)
 		assert(k->rq_head - rq_tail <= RUNTIME_RQ_SIZE);
 		spin_lock(&k->lock);
 		list_add_tail(&k->rq_overflow, &th->link);
+		log_debug("Put %p into RQ_overflow (time %lu)", th, th->ready_tsc);
 		drain_overflow(k);
 		spin_unlock(&k->lock);
 		ACCESS_ONCE(k->q_ptrs->rq_head)++;
@@ -707,12 +716,11 @@ void thread_ready(thread_t *th)
 	}
 
 	k->rq[k->rq_head % RUNTIME_RQ_SIZE] = th;
-	log_debug("put %p into runqueue (time %lu, rq_head %u, rq_tail %u)",
-	          th, th->ready_tsc, k->rq_head, k->rq_tail);
 	store_release(&k->rq_head, k->rq_head + 1);
 	if (k->rq_head - load_acquire(&k->rq_tail) == 1)
 		ACCESS_ONCE(k->q_ptrs->oldest_tsc) = th->ready_tsc;
 	ACCESS_ONCE(k->q_ptrs->rq_head)++;
+	log_debug("RQ normal %p (time %lu, head %u, tail %u)", th, th->ready_tsc, k->rq_head, k->rq_tail);
 	putk();
 }
 
@@ -797,6 +805,7 @@ static void thread_finish_cede(void)
  */
 void thread_cede(void)
 {
+	log_debug("kernel thread_cede()");
 	/* this will switch from the thread stack to the runtime stack */
 	assert_preempt_disabled();
 	jmp_runtime(thread_finish_cede);
@@ -809,6 +818,7 @@ void thread_cede(void)
  */
 void thread_yield(void)
 {
+	log_debug("user thread_yield()");
 	thread_t *curth = thread_self();
 
 	/* check for softirqs */
@@ -826,17 +836,14 @@ static __always_inline thread_t *__thread_create(void)
 	struct stack *s;
 
 	preempt_disable();
-	log_debug("1");
 	th = tcache_alloc(perthread_ptr(thread_pt));
-	log_debug("2");
+	log_debug("	uthread %p created", th);
 	if (unlikely(!th)) {
 		preempt_enable();
 		return NULL;
 	}
 
-	log_debug("3");
 	s = stack_alloc();
-	log_debug("4");
 	
 	if (unlikely(!s)) {
 		tcache_free(perthread_ptr(thread_pt), th);
@@ -886,10 +893,10 @@ thread_t *thread_create(thread_fn_t fn, void *arg)
  */
 thread_t *thread_create_with_buf(thread_fn_t fn, void **buf, size_t buf_len)
 {
-	log_debug("thread_create_with_buf: %p, buf_len %zu", fn, buf_len);
+	log_debug("thread_create_with_buf (buf_len %zu)", buf_len);
 	void *ptr;
 	thread_t *th = __thread_create();
-	log_debug("__thread_create done");
+	// log_debug("__thread_create done");
 	
 	if (unlikely(!th))
 		return NULL;
@@ -931,13 +938,13 @@ int thread_spawn(thread_fn_t fn, void *arg)
  */
 int thread_spawn_main(thread_fn_t fn, void *arg)
 {
-	log_debug("thread_spawn_main: %p", fn);
 	static bool called = false;
 	thread_t *th;
 
 	BUG_ON(called);
 	called = true;
 
+	log_debug("Creating main thread");
 	th = thread_create(fn, arg);
 	if (!th)
 		return -ENOMEM;
@@ -960,6 +967,7 @@ static void thread_finish_exit(void)
 		init_shutdown(EXIT_SUCCESS);
 
 	spin_lock(&myk()->lock);
+	log_debug("thread_finish_exit() => runtime::schedule()");
 	schedule();
 }
 
@@ -995,9 +1003,11 @@ static __noreturn void schedule_start(void)
 	ACCESS_ONCE(k->q_ptrs->rcu_gen) = 1;
 
 	spin_lock(&k->lock);
-	log_debug("kthread %d got the lock", k->kthread_idx);
+	log_debug("Got the lock");
 	k->parked = false;
 	schedule();
+	log_debug("schedule() done");
+	
 }
 
 /**
@@ -1065,7 +1075,6 @@ int sched_init(void)
 			if (i == j)
 				continue;
 			BUG_ON(siblings++);
-			log_debug("core %d sibling %d", i, j);
 			cpu_map[i].sibling_core = j;
 		}
 	}

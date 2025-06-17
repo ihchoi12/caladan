@@ -169,7 +169,7 @@ void net_error(struct mbuf *m, int err)
 
 static void net_rx_one(struct mbuf *m)
 {
-	log_debug("net_rx_one");
+	// log_debug("net_rx_one");
 	const struct eth_hdr *llhdr;
 	const struct ip_hdr *iphdr;
 	uint16_t len;
@@ -182,8 +182,10 @@ static void net_rx_one(struct mbuf *m)
 	 */
 
 	llhdr = mbuf_pull_hdr_or_null(m, *llhdr);
-	if (unlikely(!llhdr))
+	if (unlikely(!llhdr)){
+		log_debug("drop llhdr");
 		goto drop;
+	}
 
 	/* handle ARP requests */
 	if (ntoh16(llhdr->type) == ETHTYPE_ARP) {
@@ -194,9 +196,19 @@ static void net_rx_one(struct mbuf *m)
 	/* filter out requests we can't handle */
 	BUILD_ASSERT(sizeof(llhdr->dhost.addr) == sizeof(netcfg.mac.addr));
 	if (unlikely(ntoh16(llhdr->type) != ETHTYPE_IP ||
-		     memcmp(llhdr->dhost.addr, netcfg.mac.addr,
-			    sizeof(llhdr->dhost.addr)) != 0))
+			 memcmp(llhdr->dhost.addr, netcfg.mac.addr,
+				sizeof(llhdr->dhost.addr)) != 0)) {
+		if (ntoh16(llhdr->type) != ETHTYPE_IP) {
+			log_debug("drop 0: not IP packet (type=0x%04x)", ntoh16(llhdr->type));
+		} else if (memcmp(llhdr->dhost.addr, netcfg.mac.addr, sizeof(llhdr->dhost.addr)) != 0) {
+			log_debug("drop 0: MAC mismatch (dst=%02X:%02X:%02X:%02X:%02X:%02X, my=%02X:%02X:%02X:%02X:%02X:%02X)",
+				llhdr->dhost.addr[0], llhdr->dhost.addr[1], llhdr->dhost.addr[2],
+				llhdr->dhost.addr[3], llhdr->dhost.addr[4], llhdr->dhost.addr[5],
+				netcfg.mac.addr[0], netcfg.mac.addr[1], netcfg.mac.addr[2],
+				netcfg.mac.addr[3], netcfg.mac.addr[4], netcfg.mac.addr[5]);
+		}
 		goto drop;
+	}
 
 
 	/*
@@ -205,20 +217,28 @@ static void net_rx_one(struct mbuf *m)
 
 	mbuf_mark_network_offset(m);
 	iphdr = mbuf_pull_hdr_or_null(m, *iphdr);
-	if (unlikely(!iphdr))
+	if (unlikely(!iphdr)) {
+		log_debug("drop 1");
 		goto drop;
+	}
 
 	/* Did HW checksum verification pass? */
 	if (m->csum_type != CHECKSUM_TYPE_UNNECESSARY) {
-		if (chksum_internet(iphdr, sizeof(*iphdr)))
+		if (chksum_internet(iphdr, sizeof(*iphdr))) {
+			log_debug("drop 2");
 			goto drop;
+		}
 	}
 
-	if (unlikely(!ip_hdr_supported(iphdr)))
+	if (unlikely(!ip_hdr_supported(iphdr))){
+		log_debug("drop 3");
 		goto drop;
+	}
 	len = ntoh16(iphdr->len) - sizeof(*iphdr);
-	if (unlikely(mbuf_length(m) < len))
+	if (unlikely(mbuf_length(m) < len)) {
+		log_debug("drop 4");
 		goto drop;
+	}
 	if (len < mbuf_length(m))
 		mbuf_trim(m, mbuf_length(m) - len);
 
@@ -237,6 +257,7 @@ static void net_rx_one(struct mbuf *m)
 		break;
 
 	default:
+		log_debug("drop 5");
 		goto drop;
 	}
 
@@ -254,12 +275,15 @@ drop:
  */
 void net_rx_batch(struct mbuf **ms, unsigned int nr)
 {
-	log_debug("net_rx_batch");
+	// log_debug("net_rx_batch");
 	int i;
 
 	for (i = 0; i < nr; i++) {
-		if (i + RX_PREFETCH_STRIDE < nr)
+		if (i + RX_PREFETCH_STRIDE < nr) {
 			prefetch(ms[i + RX_PREFETCH_STRIDE]->data);
+			log_debug("prefetching pkt %d in this batch", i + RX_PREFETCH_STRIDE);
+		}
+		log_debug("\n\n****** PROCESSING PKT %d", i);
 		net_rx_one(ms[i]);
 	}
 }
@@ -312,7 +336,9 @@ static void iokernel_softirq(void *arg)
 		iokernel_softirq_poll(k);
 		preempt_disable();
 		k->iokernel_busy = false;
+		log_debug("iokernel_softirq() parking");
 		thread_park_and_preempt_enable();
+		log_debug("iokernel_softirq() unparked");
 	}
 }
 
@@ -347,16 +373,16 @@ struct mbuf *net_tx_alloc_mbuf(void)
 	unsigned char *buf;
 
 	preempt_disable();
-	log_debug("[TX] PREEMPT DISABLED");
+	// log_debug("[TX] PREEMPT DISABLED");
 	m = tcache_alloc(perthread_ptr(net_tx_buf_pt));
-	log_debug("tcache_alloc() done");
+	// log_debug("tcache_alloc() done");
 	if (unlikely(!m)) {
 		preempt_enable();
 		log_warn_ratelimited("net: out of tx buffers");
 		return NULL;
 	}
 	preempt_enable();
-	log_debug("[TX] PREEMPT ENABLED");
+	// log_debug("[TX] PREEMPT ENABLED");
 
 	buf = (unsigned char *)m + MBUF_HEAD_LEN;
 	mbuf_init(m, buf, net_get_mtu(), MBUF_DEFAULT_HEADROOM);
@@ -370,6 +396,7 @@ struct mbuf *net_tx_alloc_mbuf(void)
 /* drains overflow queues */
 int __noinline net_tx_drain_overflow(void)
 {
+	log_debug("net_tx_drain_overflow()");
 	struct mbuf *m;
 	struct kthread *k = myk();
 
@@ -579,11 +606,11 @@ int net_tx_ip(struct mbuf *m, uint8_t proto, uint32_t daddr)
 			return ret;
 		}
 	}
-	log_debug("TX to %02X:%02X:%02X:%02X:%02X:%02X:%u.%u.%u.%u",
-			 dhost.addr[0], dhost.addr[1], dhost.addr[2],
-			 dhost.addr[3], dhost.addr[4], dhost.addr[5],
-			 (daddr >> 24) & 0xFF, (daddr >> 16) & 0xFF,
-			 (daddr >> 8) & 0xFF, daddr & 0xFF);
+	// log_debug("TX to %02X:%02X:%02X:%02X:%02X:%02X:%u.%u.%u.%u",
+	// 		 dhost.addr[0], dhost.addr[1], dhost.addr[2],
+	// 		 dhost.addr[3], dhost.addr[4], dhost.addr[5],
+	// 		 (daddr >> 24) & 0xFF, (daddr >> 16) & 0xFF,
+	// 		 (daddr >> 8) & 0xFF, daddr & 0xFF);
 	net_tx_eth(m, ETHTYPE_IP, dhost);
 	return 0;
 }
@@ -678,10 +705,10 @@ int str_to_netaddr(const char *str, struct netaddr *addr)
  */
 int net_init_thread(void)
 {
-	log_debug("net_init_thread()");
+	// log_debug("net_init_thread()");
 	struct kthread *k = myk();
 	thread_t *th;
-
+	log_debug("Creating iokernel_softirq uthread");
 	th = thread_create(iokernel_softirq, k);
 	if (!th)
 		return -ENOMEM;
@@ -738,7 +765,7 @@ static struct net_driver_ops iokernel_ops = {
  */
 int net_init(void)
 {
-	log_info("net: started network stack");
+	// log_info("net: started network stack");
 	net_dump_config();
 
 	if (!cfg_directpath_enabled())

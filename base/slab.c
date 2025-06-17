@@ -142,7 +142,7 @@ static int __slab_early_migrate(struct slab *s)
 			goto fail;
 
 		memcpy(n, s->nodes[i], sizeof(*n));
-		log_debug("			slab_migrate: allocated node %d slab_node at NUMA-local memory %p", i, n);
+		// log_debug("		slab_migrate: allocated node %d slab_node at NUMA-local memory %p", i, n);
 		assert(list_empty(&s->nodes[i]->full_list));
 		list_head_init(&n->full_list);
 		assert(list_empty(&s->nodes[i]->partial_list));
@@ -488,24 +488,24 @@ int slab_init(void)
 {
 	int ret;
 
-	log_debug("slab_init: starting slab subsystem initialization");
+	// log_debug("slab_init: starting slab subsystem initialization");
 
 	/*
 	 * The node and smpage slabs depend on each other so
 	 * we bootstrap them here.
 	 */
-	log_debug("slab_init: early bootstrapping slab_node and smpage_slab");
+	// log_debug("slab_init: early bootstrapping slab_node and smpage_slab");
 
 	__slab_early_create(&node_slab, early_slab_nodes, "slab_node",
 			    align_up(sizeof(struct slab_node),
 				     TCACHE_MIN_ITEM_SIZE),
 			    0, 0, PGSIZE_4KB / sizeof(struct slab_node));
 
-	log_debug("slab_init: creating early slab_node");
-	log_debug("           aligned size of struct slab_node = %lu", 
-			align_up(sizeof(struct slab_node), TCACHE_MIN_ITEM_SIZE));
-	log_debug("           total slab size (1 page)         = %u", PGSIZE_4KB);
-	log_debug("           purpose: manages slab_node metadata used by the slab allocator itself");
+	// log_debug("slab_init: creating early slab_node");
+	// log_debug("           aligned size of struct slab_node = %lu", 
+	// 		align_up(sizeof(struct slab_node), TCACHE_MIN_ITEM_SIZE));
+	// log_debug("           total slab size (1 page)         = %u", PGSIZE_4KB);
+	// log_debug("           purpose: manages slab_node metadata used by the slab allocator itself");
 
 
 
@@ -514,23 +514,23 @@ int slab_init(void)
 			    (SLAB_FLAG_LGPAGE | SLAB_FLAG_PAGES),
 			    (PGSIZE_2MB - SMPAGE_META_LEN) / PGSIZE_4KB);
 
-	log_debug("slab_init: created early smpage_slab for small 4KB pages");
-	log_debug("           item size (4KB page)         = %lu", (size_t)PGSIZE_4KB);
-	log_debug("           usable slab size (exclude metadata area from 2MB page)  = %lu", (size_t)(PGSIZE_2MB - SMPAGE_META_LEN));
-	log_debug("           purpose: provides 4KB physical pages for general memory allocation");
+	// log_debug("slab_init: created early smpage_slab for small 4KB pages");
+	// log_debug("           item size (4KB page)         = %lu", (size_t)PGSIZE_4KB);
+	// log_debug("           usable slab size (exclude metadata area from 2MB page)  = %lu", (size_t)(PGSIZE_2MB - SMPAGE_META_LEN));
+	// log_debug("           purpose: provides 4KB physical pages for general memory allocation");
 
 	/*
 	 * And now we migrate them to data structures with
 	 * the proper numa affinity.
 	 */
-	log_debug("slab_init: migrating node_slab to NUMA-aware structure");
+	// log_debug("slab_init: migrating node_slab to NUMA-aware structure");
 	ret = __slab_early_migrate(&node_slab);
 	if (ret) {
 		log_err("slab_init: failed to migrate node_slab");
 		return ret;
 	}
 
-	log_debug("slab_init: migrating smpage_slab to NUMA-aware structure");
+	// log_debug("slab_init: migrating smpage_slab to NUMA-aware structure");
 	ret = __slab_early_migrate(&smpage_slab);
 	if (ret) {
 		log_err("slab_init: failed to migrate smpage_slab");
@@ -541,7 +541,7 @@ int slab_init(void)
 	 * And then finally, create the thread-local cache
 	 * for small pages.
 	 */
-	log_debug("slab_init: creating per-thread tcache for small pages");
+	// log_debug("slab_init: creating per-thread tcache for small pages");
 
 	smpage_tcache = slab_create_tcache(&smpage_slab, SMPAGE_MAG_SIZE);
 	if (!smpage_tcache) {
@@ -549,6 +549,6 @@ int slab_init(void)
 		return -ENOMEM; 
 	}
 
-	log_debug("slab_init: successfully initialized slab subsystem");
+	// log_debug("slab_init: successfully initialized slab subsystem");
 	return 0;
 }

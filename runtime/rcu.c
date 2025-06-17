@@ -40,6 +40,7 @@ DEFINE_PERTHREAD(int, rcu_read_count);
 
 static void rcu_worker(void *arg)
 {
+	log_debug("rcu_worker()");
 	struct rcu_head *head, *next;
 	unsigned int last_rcu_gen[NCPU];
 	unsigned int gen;
@@ -51,6 +52,7 @@ static void rcu_worker(void *arg)
 		if (!rcu_head) {
 			rcu_worker_th = thread_self();
 			thread_park_and_unlock_np(&rcu_lock);
+			log_debug("rcu_worker() unparked");
 			continue;
 		}
 		head = rcu_head;
@@ -153,5 +155,6 @@ void synchronize_rcu(void)
  */
 int rcu_init_late(void)
 {
+	log_debug("Spawning rcu_worker uthread");
 	return thread_spawn(rcu_worker, NULL);
 }

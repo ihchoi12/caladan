@@ -66,7 +66,7 @@ impl Backend {
                 Connection::LinuxTcp(TcpStream::connect(remote_addr)?)
             }
             Backend::Runtime => {
-                // println!("Connecting using Runtime backend to {:?}", remote_addr);
+                eprintln!("Dial {:?}", remote_addr);
                 Connection::RuntimeTcp(TcpConnection::dial(laddr, remote_addr)?)
             }
         })
@@ -117,7 +117,10 @@ impl Backend {
     {
         match *self {
             Backend::Linux => f(),
-            Backend::Runtime => shenango::runtime_init(cfgpath.unwrap().to_owned(), f).unwrap(),
+            Backend::Runtime => {
+                eprintln!("Calling runtime_init()");
+                shenango::runtime_init(cfgpath.unwrap().to_owned(), f).unwrap();
+            }
         }
     }
 }
@@ -237,6 +240,9 @@ impl Read for Connection {
 impl Drop for Connection {
     fn drop(&mut self) {
         if let Connection::RuntimeTcp(ref mut s) = *self {
+            #[cfg(feature = "log-debug")]
+            eprintln!("Dropping connection");
+
             s.abort();
         }
     }

@@ -208,7 +208,9 @@ static void arp_worker(void *arg)
 
 		if (!nr_dynamic_entries) {
 			arp_worker_th = thread_self();
+			log_debug("arp_worker() parking");
 			thread_park_and_unlock_np(&arp_lock);
+			log_debug("arp_worker() unparked");
 		} else {
 			spin_unlock_np(&arp_lock);
 			timer_sleep(ONE_SECOND);
@@ -408,7 +410,7 @@ int arp_init_late(void)
 	spin_unlock_np(&arp_lock);
 
 	free(static_entries);
-
+	log_debug("Creating arp_worker uthread");
 	arp_worker_th = thread_create(arp_worker, NULL);
 	if (!arp_worker_th)
 		return -ENOMEM;

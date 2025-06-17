@@ -207,6 +207,7 @@ static __noinline void panic_error_cqe(struct mlx5_cqe64 *cqe, uint8_t opcode)
 static int mlx5_gather_completions(struct mbuf **mbufs, struct mlx5_txq *v,
 	                               unsigned int budget)
 {
+	log_debug("mlx5_gather_completions(): budget=%u", budget);
 	struct mlx5_cqe64 *cqe;
 	uint8_t opcode;
 	uint16_t wqe_idx;
@@ -240,7 +241,7 @@ static int mlx5_gather_completions(struct mbuf **mbufs, struct mlx5_txq *v,
  */
 int mlx5_transmit_one(struct mbuf *m)
 {
-	log_debug("mlx5_transmit_one(): preparing to send %u bytes", mbuf_length(m));
+	// log_debug("mlx5_transmit_one(): preparing to send %u bytes", mbuf_length(m));
 	struct kthread *k;
 	struct mlx5_txq *v;
 	struct mbuf *mbs[SQ_CLEAN_MAX];
@@ -254,7 +255,7 @@ int mlx5_transmit_one(struct mbuf *m)
 	k = getk();
 	v = &txqs[k->kthread_idx];
 	idx = v->wq.head & (v->wq.cnt - 1);
-	log_debug("	SQ head=%u, index=%u, inflight=%u", v->wq.head, idx, nr_inflight_tx(v));
+	// log_debug("	SQ head=%u, index=%u, inflight=%u", v->wq.head, idx, nr_inflight_tx(v));
 
 	if (nr_inflight_tx(v) >= SQ_CLEAN_THRESH) {
 		log_debug("	cleaning completions (inflight >= %d)", SQ_CLEAN_THRESH);
@@ -272,7 +273,7 @@ int mlx5_transmit_one(struct mbuf *m)
 	ctrl = segment;
 	eseg = segment + sizeof(*ctrl);
 	dpseg = (void *)eseg + ((offsetof(struct mlx5_wqe_eth_seg, inline_hdr) + MLX5_ETH_L2_INLINE_HEADER_SIZE) & ~0xf);
-	log_debug("	filling WQE at index %u", idx);
+	// log_debug("	filling WQE at index %u", idx);
 
 	ctrl->opmod_idx_opcode = htobe32(((v->wq.head & 0xffff) << 8) |
 					       MLX5_OPCODE_SEND);
@@ -301,7 +302,7 @@ int mlx5_transmit_one(struct mbuf *m)
 	mmio_flush_writes();
 
 	v->bf_offset ^= MLX5_BF_SIZE;
-	log_debug("	TX issued");
+	log_debug("	NIC TX triggered");
 
 	putk();
 
@@ -350,7 +351,7 @@ int mlx5_gather_rx(struct mlx5_rxq *v, struct mbuf **ms, unsigned int budget)
 		wqe_idx = be16toh(cqe->wqe_counter) & (v->wq.cnt - 1);
 		m = v->wq.buffers[wqe_idx];
 		mbuf_fill_cqe(m, cqe);
-		log_debug("mlx5_gather_rx: received packet %u bytes", m->len);
+		// log_debug("RX %u bytes", m->len);
 		ms[rx_cnt] = m;
 	}
 

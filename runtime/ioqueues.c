@@ -146,7 +146,7 @@ void *iok_shm_alloc(size_t size, size_t alignment, shmptr_t *shm_out)
 		r->base = mem_map_shm(iok.key, NULL, r->len, shm_page_size(), true);
 		if (r->base == MAP_FAILED)
 			panic("failed to map shared memory (requested %lu bytes)", r->len);
-		log_info("shm: using %lu bytes", r->len);
+		// log_info("shm: using %lu bytes", r->len);
 	}
 
 	if (alignment)
@@ -178,6 +178,7 @@ static void ioqueue_alloc(struct queue_spec *q, size_t msg_count,
 
 int ioqueues_init_early(void)
 {
+	log_debug("ioqueues_init_early()");
 	void *shbuf;
 
 	shbuf = mem_map_shm_rdonly(IOKERNEL_INFO_KEY, NULL, IOKERNEL_INFO_SIZE,

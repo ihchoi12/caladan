@@ -95,7 +95,9 @@ int sem_wait(sem_t *__sem)
 
     myth = thread_self();
     list_add_tail(&rt_sem->waiters, &myth->link);
+	log_debug("sem_wait parking");
     thread_park_and_unlock_np(&rt_sem->lock);
+	log_debug("sem_wait unparked");
     return 0;
 }
 
