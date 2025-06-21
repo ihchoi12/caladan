@@ -284,18 +284,18 @@ int main(int argc, char *argv[])
 	}
 
 	pthread_barrier_init(&init_barrier, NULL, 2);
-	log_debug("passed pthread_barrier_init");
+	// log_debug("passed pthread_barrier_init");
 
 	ret = run_init_handlers("iokernel", iok_init_handlers,
 			ARRAY_SIZE(iok_init_handlers));
-	log_debug("FINISH run_init_handlers()");
+	// log_debug("FINISH run_init_handlers()");
 	if (ret)
 		return ret;
 
 	iok_info->cycles_per_us = cycles_per_us;
 	iok_info->external_directpath_enabled = cfg.vfio_directpath;
 	iok_info->external_directpath_rmp = vfio_prealloc_rmp;
-	log_debug("START pthread_barrier_wait()");
+	log_debug("\n\n\n START pthread_barrier_wait()");
 	pthread_barrier_wait(&init_barrier);
 	log_debug("FINISH pthread_barrier_wait()");
 

@@ -1290,11 +1290,16 @@ fn run_shortflow_client(
 
                     let mut s = stats.lock().unwrap();
                     s.push(latency_us);
+                    #[cfg(feature = "log-debug")]
+                    eprintln!("[client {}] moving out of scope", client_port);
+                    
                 }
             // }
-
+            #[cfg(feature = "log-debug")]
+            eprintln!("[client {}] wg.done() START", client_port);
             wg.done();
-            eprintln!("client {} DONE", client_port);
+            #[cfg(feature = "log-debug")]
+            eprintln!("[client {}] wg.done() DONE", client_port);
         });
     }
 
@@ -1314,6 +1319,7 @@ fn run_shortflow_client(
     wg.add(nthreads as i32);
     eprintln!("wg.wait()");
     wg.wait();
+    eprintln!("wg.wait() DONE");
 
     // Output stats
     let stats = stats.lock().unwrap();

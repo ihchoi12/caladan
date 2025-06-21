@@ -131,6 +131,8 @@ impl Write for TcpConnection {
 }
 impl Drop for TcpConnection {
     fn drop(&mut self) {
+        #[cfg(feature = "log-debug")]
+        eprintln!("Dropping TcpConnection");
         unsafe { ffi::tcp_close(self.0) }
     }
 }

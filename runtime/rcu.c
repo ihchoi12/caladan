@@ -51,6 +51,7 @@ static void rcu_worker(void *arg)
 		spin_lock_np(&rcu_lock);
 		if (!rcu_head) {
 			rcu_worker_th = thread_self();
+			log_debug("rcu_worker() parking");
 			thread_park_and_unlock_np(&rcu_lock);
 			log_debug("rcu_worker() unparked");
 			continue;
@@ -109,8 +110,10 @@ void rcu_free(struct rcu_head *head, rcu_callback_t func)
 	rcu_head = head;
 	spin_unlock_np(&rcu_lock);
 
-	if (th)
+	if (th){
+		log_debug("Wake up rcu_worker()");
 		thread_ready(th);
+	}
 }
 
 struct sync_arg {

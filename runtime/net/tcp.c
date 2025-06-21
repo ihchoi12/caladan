@@ -420,6 +420,7 @@ static void tcp_conn_release(struct rcu_head *h)
  */
 void tcp_conn_destroy(tcpconn_t *c)
 {
+	log_debug("tcp_conn_destroy(%p)", c);
 	trans_table_remove(&c->e);
 	rcu_free(&c->e.rcu, tcp_conn_release);
 }
@@ -1405,6 +1406,7 @@ void tcp_abort(tcpconn_t *c)
  */
 void tcp_close(tcpconn_t *c)
 {
+	log_debug("tcp_close(%p)", c);
 	int ret;
 
 	spin_lock_np(&c->lock);

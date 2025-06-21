@@ -458,14 +458,15 @@ static void control_remove_client(struct proc *p)
 
 static void control_loop(void)
 {
+	log_debug("control_loop(): START");
 	int ret;
 	uint64_t cmd, efdval;
 	unsigned long payload;
 	struct proc *p;
 	struct epoll_event ev;
-	log_debug("control_loop: START pthread_barrier_wait");
+	log_debug("control_loop(): START pthread_barrier_wait");
 	pthread_barrier_wait(&init_barrier);
-	log_debug("control_loop: FINISH pthread_barrier_wait");
+	log_debug("control_loop(): FINISH pthread_barrier_wait");
 
 	while (1) {
 		log_debug("\n ======= NEW control_loop() =======");

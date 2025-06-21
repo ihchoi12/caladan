@@ -245,6 +245,8 @@ impl Drop for Connection {
 
             s.abort();
         }
+        #[cfg(feature = "log-debug")]
+        eprintln!("Dropping connection DONE");
     }
 }
 
