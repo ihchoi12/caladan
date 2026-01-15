@@ -562,11 +562,26 @@ fn process_result_final(
         // first_tsc.unwrap()
     );
 
-    eprintln!("\n\n[0] Writing data into files...");    
-    return true;
+    eprintln!("\n\n[0] Writing data into files...");
+    // return true;
     unsafe {
         if let Some(exptid) = &EXPTID {
             if exptid != "null" {
+                // Write latency_count file: [latency],[count]
+                let latency_count_path = format!("{}.latency_count", exptid);
+                match File::create(&latency_count_path) {
+                    Ok(mut file) => {
+                        for (latency, count) in buckets.iter() {
+                            writeln!(file, "{},{}", latency, count).expect("Failed to write to latency_count file");
+                        }
+                        eprintln!("Wrote latency_count to {}", latency_count_path);
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to create file {}: {:?}", latency_count_path, e);
+                    }
+                }
+                return true;
+                // Write .latency file with statistics
                 if let Ok(mut file) = File::create(format!("{}.latency", exptid)) {
                     let mut latencies: Vec<f64> = Vec::new();
                     let mut counts: Vec<usize> = Vec::new();
@@ -577,8 +592,8 @@ fn process_result_final(
                     }
 
                     let total_count: u32 = counts.iter().map(|&count| count as u32).sum();
-                    
-                    
+
+
                     write!(file, "Latencies: \n").expect("Failed to write to file");
                     let mut cumulative_percentage = 0.0;
                     for (k, v) in buckets.iter() {
@@ -587,8 +602,8 @@ fn process_result_final(
                         write!(file, "{},{},{:.2}\n", k, buckets[k], cumulative_percentage).expect("Failed to write to file");
                     }
                     writeln!(file, "").expect("Failed to write to file");
-                    
-                    
+
+
                     let mean: f64 = latencies.iter().zip(counts.iter()).map(|(&l, &c)| l * c as f64).sum::<f64>() / total_count as f64;
                     let squared_diffs: Vec<f64> = latencies.iter().map(|&x| (x - mean).powi(2)).collect();
                     let variance: f64 = squared_diffs.iter().sum::<f64>() / total_count as f64;

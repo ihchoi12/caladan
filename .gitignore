@@ -6,3 +6,5 @@ iokerneld
 *~
 .cproject
 .project
+.vscode/
+build/
