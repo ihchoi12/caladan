@@ -1240,6 +1240,7 @@ fn run_shortflow_client(
     let stop_flag = Arc::new(AtomicBool::new(false));
     let wg = shenango::WaitGroup::new();
     let stats = Arc::new(Mutex::new(Vec::new()));
+    let conn_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let start = Instant::now();
 
     for i in 0..nthreads {
@@ -1249,12 +1250,15 @@ fn run_shortflow_client(
         let proto = proto.clone();
         let wg = wg.clone();
         let stats = stats.clone();
+        let conn_count = conn_count.clone();
         let client_port = 30000 + i as u16;
 
         backend.spawn_thread(move || {
             let mut buffer = vec![0u8; 4096];
             let mut payload = Vec::with_capacity(4096);
             let mut rng = rand::thread_rng();
+
+            const CONN_DURATION_US: u128 = 1111; // 1111us per connection
 
             while !stop_flag.load(Ordering::Relaxed) {
                 let src_addr = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), client_port);
@@ -1263,31 +1267,38 @@ fn run_shortflow_client(
                     Transport::Tcp => backend.create_tcp_connection(Some(src_addr), addr),
                     Transport::Udp => backend.create_udp_connection(src_addr, Some(addr)),
                 } {
-                    // backend.sleep(Duration::from_millis(1)); // let TCP handshake finish
+                    conn_count.fetch_add(1, Ordering::Relaxed);
+                    let conn_start = Instant::now();
 
-                    let mut buf = Buffer::new(&mut buffer);
-                    let mut packet = Packet {
-                        randomness: rand::random(),
-                        work_iterations: 1,
-                        target_start: Duration::ZERO,
-                        client_port,
-                        ..Default::default()
-                    };
+                    // Send requests in closed-loop until 1111us elapsed
+                    while conn_start.elapsed().as_micros() < CONN_DURATION_US {
+                        let mut buf = Buffer::new(&mut buffer);
+                        let mut packet = Packet {
+                            randomness: rand::random(),
+                            work_iterations: 1,
+                            target_start: Duration::ZERO,
+                            client_port,
+                            ..Default::default()
+                        };
 
-                    payload.clear();
-                    proto.gen_req(0, &packet, &mut payload);
+                        payload.clear();
+                        proto.gen_req(0, &packet, &mut payload);
 
-                    let send_time = Instant::now();
-                    if let Err(_) = conn.write_all(&payload) {
-                        continue;
+                        let send_time = Instant::now();
+                        if let Err(_) = conn.write_all(&payload) {
+                            break;
+                        }
+
+                        if let Err(_) = proto.read_response(&conn, &mut buf) {
+                            break;
+                        }
+                        let recv_time = Instant::now();
+                        let latency_us = (recv_time - send_time).as_micros() as u64;
+
+                        let mut s = stats.lock().unwrap();
+                        s.push(latency_us);
                     }
-
-                    let _ = proto.read_response(&conn, &mut buf);
-                    let recv_time = Instant::now();
-                    let latency_us = (recv_time - send_time).as_micros() as u64;
-
-                    let mut s = stats.lock().unwrap();
-                    s.push(latency_us);
+                    // Connection closes here when conn goes out of scope
                 }
             }
 
@@ -1312,7 +1323,9 @@ fn run_shortflow_client(
     let mut data = stats.clone();
     data.sort();
     let count = data.len();
+    let total_conns = conn_count.load(Ordering::Relaxed);
     println!("\n[ShortFlow Results]");
+    println!("Total connections: {}", total_conns);
     println!("Total requests: {}", count);
     println!(
         "Throughput (RPS): {:.2}",
@@ -1326,6 +1339,34 @@ fn run_shortflow_client(
         println!("Median (us): {}", percentile(50.0));
         println!("90th (us): {}", percentile(90.0));
         println!("99th (us): {}", percentile(99.0));
+    }
+
+    // Write latency_count file: [latency],[count]
+    if count > 0 {
+        // Build latency histogram (buckets)
+        let mut buckets: std::collections::BTreeMap<u64, usize> = std::collections::BTreeMap::new();
+        for lat in data.iter() {
+            *buckets.entry(*lat).or_insert(0) += 1;
+        }
+
+        unsafe {
+            if let Some(exptid) = &EXPTID {
+                if exptid != "null" {
+                    let latency_count_path = format!("{}.shortflow_latency_count", exptid);
+                    match File::create(&latency_count_path) {
+                        Ok(mut file) => {
+                            for (latency, cnt) in buckets.iter() {
+                                writeln!(file, "{},{}", latency, cnt).expect("Failed to write to latency_count file");
+                            }
+                            eprintln!("Wrote latency_count to {}", latency_count_path);
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to create file {}: {:?}", latency_count_path, e);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     if let Some(ref mut g) = *barrier_group {
