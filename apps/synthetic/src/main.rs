@@ -1596,7 +1596,7 @@ fn get_partial_uniform_distribution(
     })
 }
 
-fn zipf_gen_classic_packet_schedule(
+fn gen_single_conn_schedule(
     runtime: Duration,
     pps: f64,
     output: OutputMode,
@@ -1812,7 +1812,7 @@ fn gen_partial_uniform_experiment(
     schedules
 }
 
-fn zipf_process_result_final(
+fn process_per_conn_result_final(
     total_pps: usize,
     scheds: Vec<RequestSchedule>,
     results: Vec<ScheduleResult>,
@@ -1934,6 +1934,20 @@ fn zipf_process_result_final(
     unsafe {
         if let Some(exptid) = &EXPTID {
             if exptid != "null" {
+                // Write latency_count file: [latency],[count]
+                let latency_count_path = format!("{}.latency_count", exptid);
+                match File::create(&latency_count_path) {
+                    Ok(mut file) => {
+                        for (latency, count) in buckets.iter() {
+                            writeln!(file, "{},{}", latency, count).expect("Failed to write to latency_count file");
+                        }
+                        eprintln!("Wrote latency_count to {}", latency_count_path);
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to create file {}: {:?}", latency_count_path, e);
+                    }
+                }
+
                 if let Ok(mut file) = File::create(format!("{}.latency", exptid)) {
                     let mut latencies: Vec<f64> = Vec::new();
                     let mut counts: Vec<usize> = Vec::new();
@@ -2038,7 +2052,7 @@ fn zipf_process_result_final(
     true
 }
 
-fn zipf_process_result_final_per_server(
+fn process_per_conn_result_final_per_server(
     results: Vec<ScheduleResult>,
 ) -> bool {
     let mut buckets: BTreeMap<u64, usize> = BTreeMap::new();
@@ -2205,7 +2219,7 @@ fn zipf_process_result_final_per_server(
     true
 }
 
-fn zipf_run_client_per_server(
+fn run_per_conn_client_multi_server(
     proto: Arc<Box<dyn LoadgenProtocol>>,
     backend: Backend,
     addrs: &Vec<SocketAddrV4>,
@@ -2260,11 +2274,11 @@ fn zipf_run_client_per_server(
         .flatten() // Flatten the Vec<Vec<Option<ScheduleResult>>> to Vec<Option<ScheduleResult>>
         .map(|packet| packet.unwrap_or_default()) // Convert Option<ScheduleResult> to ScheduleResult
         .collect(); // Collect into Vec<ScheduleResult>
-    zipf_process_result_final_per_server(results);
+    process_per_conn_result_final_per_server(results);
 }
 
 
-fn zipf_run_client(
+fn run_per_conn_client(
     total_ppss: Vec<usize>,
     proto: Arc<Box<dyn LoadgenProtocol>>,
     backend: Backend,
@@ -2384,7 +2398,7 @@ fn zipf_run_client(
 
         let sched_start = sched_starts.into_iter().min().unwrap();
 
-        ret = zipf_process_result_final(total_pps, scheds, results, start_unix, sched_start) && ret;
+        ret = process_per_conn_result_final(total_pps, scheds, results, start_unix, sched_start) && ret;
         // eprintln!("\n*******************************************\n");
     }
 
@@ -2696,6 +2710,12 @@ fn main() {
                 .takes_value(true)
                 .help("Duration of each shortflow connection in microseconds (required when --shortflow is used)"),
         )
+        .arg(
+            Arg::with_name("per-conn-workload")
+                .long("per-conn-workload")
+                .takes_value(true)
+                .help("Per-connection RPS distribution, e.g., '1,2,3,4,5' creates 5 connections with 1,2,3,4,5 RPS respectively"),
+        )
         .args(&SyntheticProtocol::args())
         .args(&MemcachedProtocol::args())
         .args(&DnsProtocol::args())
@@ -2940,6 +2960,51 @@ fn main() {
                     return;
                 }
 
+                // Per-connection workload mode: --per-conn-workload=1,2,3,4,5
+                if let Some(per_conn_spec) = matches.value_of("per-conn-workload") {
+                    let rps_list: Vec<f64> = per_conn_spec
+                        .split(",")
+                        .map(|s| s.trim().parse::<f64>().expect("Invalid RPS value in --per-conn-workload"))
+                        .collect();
+
+                    let num_conns = rps_list.len();
+                    let total_pps: usize = rps_list.iter().map(|&r| r as usize).sum();
+
+                    eprintln!("[per-conn-workload] {} connections with RPS: {:?}, total: {} RPS", num_conns, rps_list, total_pps);
+
+                    let schedules: Vec<Arc<Vec<RequestSchedule>>> = rps_list
+                        .iter()
+                        .map(|&pps| {
+                            let pps = if pps < 1.0 { 1.0 } else { pps };
+                            Arc::new(gen_single_conn_schedule(
+                                runtime,
+                                pps,
+                                output,
+                                distribution,
+                                rampup,
+                                discard_pct,
+                            ))
+                        })
+                        .collect();
+
+                    run_per_conn_client(
+                        vec![total_pps],
+                        proto,
+                        backend,
+                        &addrs,
+                        num_conns,
+                        tport,
+                        &mut barrier_group,
+                        schedules,
+                        1,
+                    );
+
+                    if let Some(ref mut g) = barrier_group {
+                        g.barrier();
+                    }
+                    return;
+                }
+
                 if live_mode {
                     let sched = gen_classic_packet_schedule(
                         runtime,
@@ -2973,7 +3038,7 @@ fn main() {
                         //     eprint!("\n\n");
                         // }
                         let schedules = schedules.into_iter().map(|e| Arc::new(e)).collect();
-                        zipf_run_client_per_server(
+                        run_per_conn_client_multi_server(
                             proto,
                             backend,
                             &addrs,
@@ -3013,7 +3078,7 @@ fn main() {
                     //     eprint!("\n\n");
                     // }
                     let schedules = schedules.into_iter().map(|e| Arc::new(e)).collect();
-                    zipf_run_client_per_server(
+                    run_per_conn_client_multi_server(
                         proto,
                         backend,
                         &addrs,
@@ -3066,7 +3131,7 @@ fn main() {
                             pps = 1.0;
                         }
                         // eprintln!("pps: {}      //", pps);
-                        Arc::new(zipf_gen_classic_packet_schedule(
+                        Arc::new(gen_single_conn_schedule(
                             runtime,
                             pps,
                             output,
@@ -3076,7 +3141,7 @@ fn main() {
                         ))
                     }).collect_vec();
                     eprintln!("\n");
-                    zipf_run_client(
+                    run_per_conn_client(
                         vec![packets_per_second],
                         proto,
                         backend,
