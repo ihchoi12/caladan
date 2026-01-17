@@ -1232,6 +1232,7 @@ fn run_shortflow_client(
     tport: Transport,
     barrier_group: &mut Option<lockstep::Group>,
     runtime: Duration,
+    conn_duration_us: u64,
 ) {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
@@ -1258,8 +1259,6 @@ fn run_shortflow_client(
             let mut payload = Vec::with_capacity(4096);
             let mut rng = rand::thread_rng();
 
-            const CONN_DURATION_US: u128 = 1111; // 1111us per connection
-
             while !stop_flag.load(Ordering::Relaxed) {
                 let src_addr = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), client_port);
 
@@ -1270,8 +1269,8 @@ fn run_shortflow_client(
                     conn_count.fetch_add(1, Ordering::Relaxed);
                     let conn_start = Instant::now();
 
-                    // Send requests in closed-loop until 1111us elapsed
-                    while conn_start.elapsed().as_micros() < CONN_DURATION_US {
+                    // Send requests in closed-loop until conn_duration_us elapsed
+                    while conn_start.elapsed().as_micros() < conn_duration_us as u128 {
                         let mut buf = Buffer::new(&mut buffer);
                         let mut packet = Packet {
                             randomness: rand::random(),
@@ -2691,6 +2690,12 @@ fn main() {
                 .takes_value(false)
                 .help("Enable short-flow mode: each connection sends one request, then reconnects"),
         )
+        .arg(
+            Arg::with_name("shortflow-duration")
+                .long("shortflow-duration")
+                .takes_value(true)
+                .help("Duration of each shortflow connection in microseconds (required when --shortflow is used)"),
+        )
         .args(&SyntheticProtocol::args())
         .args(&MemcachedProtocol::args())
         .args(&DnsProtocol::args())
@@ -2799,19 +2804,24 @@ fn main() {
         return;
     }
 
-    let zipf = matches.value_of("zipf")
-        .map(|alpha| alpha.parse::<f64>().unwrap())
-        .filter(|&alpha| if nthreads == 1 {
-            panic!("ZIPF distribution was selected with only 1 thread.");
-            false
-        } 
-        // else if alpha == 0.0 {
-        //     panic!("Alpha = 0 is a uniform distribution.");
-        //     false
-        // } 
-        else {
-            true
-        });
+    let zipf = if matches.is_present("shortflow") {
+        // Ignore zipf parameter in shortflow mode
+        None
+    } else {
+        matches.value_of("zipf")
+            .map(|alpha| alpha.parse::<f64>().unwrap())
+            .filter(|&alpha| if nthreads == 1 {
+                panic!("ZIPF distribution was selected with only 1 thread.");
+                false
+            }
+            // else if alpha == 0.0 {
+            //     panic!("Alpha = 0 is a uniform distribution.");
+            //     false
+            // }
+            else {
+                true
+            })
+    };
 
     match mode {
         "spawner-server" => match tport {
@@ -2912,6 +2922,11 @@ fn main() {
                     _ => (),
                 };
                 if matches.is_present("shortflow") {
+                    let shortflow_duration_us = matches
+                        .value_of("shortflow-duration")
+                        .expect("--shortflow-duration is required when using --shortflow")
+                        .parse::<u64>()
+                        .expect("--shortflow-duration must be a valid integer (microseconds)");
                     run_shortflow_client(
                         proto,
                         backend,
@@ -2920,6 +2935,7 @@ fn main() {
                         tport,
                         &mut barrier_group,
                         runtime,
+                        shortflow_duration_us,
                     );
                     return;
                 }
