@@ -1269,8 +1269,41 @@ fn run_shortflow_client(
                     conn_count.fetch_add(1, Ordering::Relaxed);
                     let conn_start = Instant::now();
 
+                    // Shared flags for coordination between main loop and watchdog
+                    let conn_timeout_flag = Arc::new(AtomicBool::new(false));
+                    let conn_done_flag = Arc::new(AtomicBool::new(false));
+                    let conn_timeout_flag_clone = conn_timeout_flag.clone();
+                    let conn_done_flag_clone = conn_done_flag.clone();
+
+                    // Get raw pointer to connection for watchdog thread
+                    struct SendPtr(*const Connection);
+                    unsafe impl Send for SendPtr {}
+                    let conn_ptr = SendPtr(&conn as *const Connection);
+
+                    // Watchdog thread: abort connection after conn_duration_us
+                    let watchdog = backend.spawn_thread(move || {
+                        let start = Instant::now();
+                        let duration = Duration::from_micros(conn_duration_us);
+                        let check_interval = Duration::from_micros(100); // Check every 100us
+
+                        // Sleep in short intervals, checking if main loop is done
+                        while start.elapsed() < duration {
+                            if conn_done_flag_clone.load(Ordering::Relaxed) {
+                                return; // Main loop finished early, no need to abort
+                            }
+                            backend.sleep(check_interval);
+                        }
+
+                        // Duration expired - abort the connection
+                        if !conn_done_flag_clone.load(Ordering::Relaxed) {
+                            conn_timeout_flag_clone.store(true, Ordering::Relaxed);
+                            unsafe { (*conn_ptr.0).abort(); }
+                        }
+                    });
+
                     // Send requests in closed-loop until conn_duration_us elapsed
-                    while conn_start.elapsed().as_micros() < conn_duration_us as u128 {
+                    while conn_start.elapsed().as_micros() < conn_duration_us as u128
+                          && !conn_timeout_flag.load(Ordering::Relaxed) {
                         let mut buf = Buffer::new(&mut buffer);
                         let mut packet = Packet {
                             randomness: rand::random(),
@@ -1288,8 +1321,13 @@ fn run_shortflow_client(
                             break;
                         }
 
-                        if let Err(_) = proto.read_response(&conn, &mut buf) {
+                        // Check timeout flag before blocking read
+                        if conn_timeout_flag.load(Ordering::Relaxed) {
                             break;
+                        }
+
+                        if let Err(_) = proto.read_response(&conn, &mut buf) {
+                            break; // Error (timeout or other), exit
                         }
                         let recv_time = Instant::now();
                         let latency_us = (recv_time - send_time).as_micros() as u64;
@@ -1297,6 +1335,11 @@ fn run_shortflow_client(
                         let mut s = stats.lock().unwrap();
                         s.push(latency_us);
                     }
+
+                    // Signal watchdog that main loop is done
+                    conn_done_flag.store(true, Ordering::Relaxed);
+                    // Wait for watchdog (should exit quickly now)
+                    let _ = watchdog.join();
                     // Connection closes here when conn goes out of scope
                 }
             }
@@ -2968,9 +3011,19 @@ fn main() {
                         .collect();
 
                     let num_conns = rps_list.len();
-                    let total_pps: usize = rps_list.iter().map(|&r| r as usize).sum();
 
-                    eprintln!("[per-conn-workload] {} connections with RPS: {:?}, total: {} RPS", num_conns, rps_list, total_pps);
+                    if num_conns != nthreads {
+                        panic!(
+                            "--per-conn-workload specifies {} connections, but --nthreads is {}. They must match.",
+                            num_conns, nthreads
+                        );
+                    }
+
+                    let total_pps: usize = rps_list.iter().map(|&r| r as usize).sum();
+                    let max_rps = rps_list.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                    let min_rps = rps_list.iter().cloned().fold(f64::INFINITY, f64::min);
+
+                    // eprintln!("[per-conn-workload] {} connections, RPS range: [{:.0} ~ {:.0}], total: {} RPS", num_conns, max_rps, min_rps, total_pps);
 
                     let schedules: Vec<Arc<Vec<RequestSchedule>>> = rps_list
                         .iter()

@@ -455,7 +455,7 @@ void tcp_tx_retransmit(tcpconn_t *c)
 			continue;
 
 		m->timestamp = now;
-		printf("TIMEOUT\n");
+		printf("TIMEOUT src_port=%u\n", c->e.laddr.port);
 		ret = tcp_tx_retransmit_one(c, m);
 		if (ret)
 			break;

@@ -221,6 +221,17 @@ impl Connection {
     pub fn shutdown(&self) {
         self.shutdown_rdwr(libc::SHUT_RDWR);
     }
+
+    #[allow(unused)]
+    pub fn abort(&self) {
+        match *self {
+            Connection::LinuxTcp(ref s) => unsafe {
+                let _ = libc::shutdown(s.as_raw_fd(), libc::SHUT_RDWR);
+            },
+            Connection::RuntimeTcp(ref s) => s.abort(),
+            _ => {} // UDP doesn't need abort
+        }
+    }
 }
 
 impl Read for Connection {
