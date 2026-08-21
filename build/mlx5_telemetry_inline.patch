@@ -34,7 +34,7 @@ index 89dac0c65a..e135debbf1 100644
  		loc.mbuf_free = 0;
  	loc.pkts_sent = 0;
 diff --git a/drivers/net/mlx5/mlx5_txq.c b/drivers/net/mlx5/mlx5_txq.c
-index 0140f8b3b2..1c210c7464 100644
+index 0140f8b3b2..3a27fb223f 100644
 --- a/drivers/net/mlx5/mlx5_txq.c
 +++ b/drivers/net/mlx5/mlx5_txq.c
 @@ -16,6 +16,7 @@
@@ -56,7 +56,7 @@ index 0140f8b3b2..1c210c7464 100644
  	if (txq_calc_wqebb_cnt(tmpl) >
  	    priv->sh->dev_cap.max_qp_wr) {
  		DRV_LOG(ERR,
-@@ -1318,3 +1323,91 @@ mlx5_txq_dynf_timestamp_set(struct rte_eth_dev *dev)
+@@ -1318,3 +1323,93 @@ mlx5_txq_dynf_timestamp_set(struct rte_eth_dev *dev)
  				     ts_mask : 0;
  	}
  }
@@ -120,11 +120,13 @@ index 0140f8b3b2..1c210c7464 100644
 +		if (txq == NULL || txq->inlen_send_max == 0)
 +			continue;
 +		if (minimal) {
-+			/* Uniform pointer mode: zero budgets avoid the mixed
-+			 * inline/pointer eMPW sessions this code base does not
-+			 * exercise at stock settings.
++			/* Pointer-mode floor: keep the ordinary-SEND budget at
++			 * its legal minimum (a zero budget breaks the single-
++			 * packet path under the inline template) and disable
++			 * eMPW inlining entirely for uniform pointer sessions.
 +			 */
-+			txq->inlen_send_req = 0;
++			txq->inlen_send_req = MLX5_ESEG_MIN_INLINE_SIZE +
++					      MLX5_WQE_DSEG_SIZE;
 +			txq->inlen_empw_req = 0;
 +		} else {
 +			txq->inlen_send_req = txq->inlen_send_max;
