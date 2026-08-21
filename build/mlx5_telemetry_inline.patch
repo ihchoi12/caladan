@@ -1,18 +1,40 @@
 diff --git a/drivers/net/mlx5/mlx5_tx.h b/drivers/net/mlx5/mlx5_tx.h
-index 89dac0c65a..a71a200403 100644
+index 89dac0c65a..e135debbf1 100644
 --- a/drivers/net/mlx5/mlx5_tx.h
 +++ b/drivers/net/mlx5/mlx5_tx.h
-@@ -144,6 +144,8 @@ struct mlx5_txq_data {
+@@ -144,6 +144,12 @@ struct mlx5_txq_data {
  	uint16_t inlen_send; /* Ordinary send data inline size. */
  	uint16_t inlen_empw; /* eMPW max packet size to inline. */
  	uint16_t inlen_mode; /* Minimal data length to inline. */
 +	uint16_t inlen_send_max; /* Send inline budget computed at setup. */
 +	uint16_t inlen_empw_max; /* eMPW inline budget computed at setup. */
++	uint16_t inlen_send_req; /* Staged send budget (applied at burst entry). */
++	uint16_t inlen_empw_req; /* Staged eMPW budget (applied at burst entry). */
++	uint8_t budget_req_seq; /* Bumped per staged budget request. */
++	uint8_t budget_ack_seq; /* Set by the datapath when applied. */
  	uint32_t qp_num_8s; /* QP number shifted by 8. */
  	uint64_t offloads; /* Offloads for Tx Queue. */
  	struct mlx5_mr_ctrl mr_ctrl; /* MR control descriptor. */
+@@ -3405,6 +3411,17 @@ mlx5_tx_burst_tmpl(struct mlx5_txq_data *__rte_restrict txq,
+ 	MLX5_ASSERT(txq->wqe_s >= (uint16_t)(txq->wqe_ci - txq->wqe_pi));
+ 	if (unlikely(!pkts_n))
+ 		return 0;
++	if (unlikely(txq->budget_req_seq != txq->budget_ack_seq) &&
++	    txq->elts_head == txq->elts_tail &&
++	    txq->wqe_ci == txq->wqe_pi) {
++		/* Apply staged budgets only when nothing is in flight:
++		 * completion handling must see every packet finish under
++		 * the mode it was sent with.
++		 */
++		txq->inlen_send = txq->inlen_send_req;
++		txq->inlen_empw = txq->inlen_empw_req;
++		txq->budget_ack_seq = txq->budget_req_seq;
++	}
+ 	if (MLX5_TXOFF_CONFIG(INLINE))
+ 		loc.mbuf_free = 0;
+ 	loc.pkts_sent = 0;
 diff --git a/drivers/net/mlx5/mlx5_txq.c b/drivers/net/mlx5/mlx5_txq.c
-index 0140f8b3b2..50411571c7 100644
+index 0140f8b3b2..1c210c7464 100644
 --- a/drivers/net/mlx5/mlx5_txq.c
 +++ b/drivers/net/mlx5/mlx5_txq.c
 @@ -16,6 +16,7 @@
@@ -23,16 +45,18 @@ index 0140f8b3b2..50411571c7 100644
  
  #include <mlx5_common.h>
  #include <mlx5_common_mr.h>
-@@ -1096,6 +1097,8 @@ mlx5_txq_new(struct rte_eth_dev *dev, uint16_t idx, uint16_t desc,
+@@ -1096,6 +1097,10 @@ mlx5_txq_new(struct rte_eth_dev *dev, uint16_t idx, uint16_t desc,
  	txq_set_params(tmpl);
  	if (txq_adjust_params(tmpl))
  		goto error;
 +	tmpl->txq.inlen_send_max = tmpl->txq.inlen_send;
 +	tmpl->txq.inlen_empw_max = tmpl->txq.inlen_empw;
++	tmpl->txq.inlen_send_req = tmpl->txq.inlen_send;
++	tmpl->txq.inlen_empw_req = tmpl->txq.inlen_empw;
  	if (txq_calc_wqebb_cnt(tmpl) >
  	    priv->sh->dev_cap.max_qp_wr) {
  		DRV_LOG(ERR,
-@@ -1318,3 +1321,89 @@ mlx5_txq_dynf_timestamp_set(struct rte_eth_dev *dev)
+@@ -1318,3 +1323,91 @@ mlx5_txq_dynf_timestamp_set(struct rte_eth_dev *dev)
  				     ts_mask : 0;
  	}
  }
@@ -96,15 +120,17 @@ index 0140f8b3b2..50411571c7 100644
 +		if (txq == NULL || txq->inlen_send_max == 0)
 +			continue;
 +		if (minimal) {
-+			txq->inlen_send = MLX5_ESEG_MIN_INLINE_SIZE +
-+					  MLX5_WQE_DSEG_SIZE;
-+			txq->inlen_empw = txq->inlen_empw_max ?
-+					  MLX5_WQE_SIZE +
-+					  MLX5_DSEG_MIN_INLINE_SIZE : 0;
++			/* Uniform pointer mode: zero budgets avoid the mixed
++			 * inline/pointer eMPW sessions this code base does not
++			 * exercise at stock settings.
++			 */
++			txq->inlen_send_req = 0;
++			txq->inlen_empw_req = 0;
 +		} else {
-+			txq->inlen_send = txq->inlen_send_max;
-+			txq->inlen_empw = txq->inlen_empw_max;
++			txq->inlen_send_req = txq->inlen_send_max;
++			txq->inlen_empw_req = txq->inlen_empw_max;
 +		}
++		txq->budget_req_seq++;
 +		updated++;
 +	}
 +	if (updated == 0)
