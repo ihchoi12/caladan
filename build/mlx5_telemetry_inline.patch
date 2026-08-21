@@ -1,0 +1,124 @@
+diff --git a/drivers/net/mlx5/mlx5_tx.h b/drivers/net/mlx5/mlx5_tx.h
+index 89dac0c65a..a71a200403 100644
+--- a/drivers/net/mlx5/mlx5_tx.h
++++ b/drivers/net/mlx5/mlx5_tx.h
+@@ -144,6 +144,8 @@ struct mlx5_txq_data {
+ 	uint16_t inlen_send; /* Ordinary send data inline size. */
+ 	uint16_t inlen_empw; /* eMPW max packet size to inline. */
+ 	uint16_t inlen_mode; /* Minimal data length to inline. */
++	uint16_t inlen_send_max; /* Send inline budget computed at setup. */
++	uint16_t inlen_empw_max; /* eMPW inline budget computed at setup. */
+ 	uint32_t qp_num_8s; /* QP number shifted by 8. */
+ 	uint64_t offloads; /* Offloads for Tx Queue. */
+ 	struct mlx5_mr_ctrl mr_ctrl; /* MR control descriptor. */
+diff --git a/drivers/net/mlx5/mlx5_txq.c b/drivers/net/mlx5/mlx5_txq.c
+index 0140f8b3b2..50411571c7 100644
+--- a/drivers/net/mlx5/mlx5_txq.c
++++ b/drivers/net/mlx5/mlx5_txq.c
+@@ -16,6 +16,7 @@
+ #include <rte_bus_pci.h>
+ #include <rte_common.h>
+ #include <rte_eal_paging.h>
++#include <rte_telemetry.h>
+ 
+ #include <mlx5_common.h>
+ #include <mlx5_common_mr.h>
+@@ -1096,6 +1097,8 @@ mlx5_txq_new(struct rte_eth_dev *dev, uint16_t idx, uint16_t desc,
+ 	txq_set_params(tmpl);
+ 	if (txq_adjust_params(tmpl))
+ 		goto error;
++	tmpl->txq.inlen_send_max = tmpl->txq.inlen_send;
++	tmpl->txq.inlen_empw_max = tmpl->txq.inlen_empw;
+ 	if (txq_calc_wqebb_cnt(tmpl) >
+ 	    priv->sh->dev_cap.max_qp_wr) {
+ 		DRV_LOG(ERR,
+@@ -1318,3 +1321,89 @@ mlx5_txq_dynf_timestamp_set(struct rte_eth_dev *dev)
+ 				     ts_mask : 0;
+ 	}
+ }
++
++/*
++ * Runtime switch between full and minimal data-inline budgets.
++ *
++ * With minimal budgets packets above the 18B floor take the pointer path
++ * inside the inline-capable tx_burst template, approximating the
++ * non-inline template without reselecting the tx function. The budget
++ * fields are per-queue uint16 values reloaded on every tx_burst call and
++ * aligned stores are atomic on x86, so no quiescing is needed. The WQE
++ * ring is sized for the setup-time (maximum) budgets, hence shrinking and
++ * restoring them at run time stays within provisioned capacity.
++ */
++static int
++mlx5_txq_inline_set_handler(const char *cmd __rte_unused, const char *params,
++			    struct rte_tel_data *info)
++{
++	struct rte_eth_dev *dev;
++	struct mlx5_priv *priv;
++	unsigned int i, updated = 0;
++	unsigned long port_id;
++	bool minimal;
++	const char *mode;
++	const char *status = "ok";
++	char *end;
++
++	rte_tel_data_start_dict(info);
++	if (params == NULL) {
++		rte_tel_data_add_dict_string(info, "status", "missing params");
++		return 0;
++	}
++	port_id = strtoul(params, &end, 10);
++	if (end == params || *end != ',' || port_id >= RTE_MAX_ETHPORTS) {
++		rte_tel_data_add_dict_string(info, "status", "bad port");
++		return 0;
++	}
++	mode = end + 1;
++	if (strncmp(mode, "min", 3) == 0) {
++		minimal = true;
++	} else if (strncmp(mode, "full", 4) == 0) {
++		minimal = false;
++	} else {
++		rte_tel_data_add_dict_string(info, "status", "bad mode");
++		return 0;
++	}
++	if (!rte_eth_dev_is_valid_port((uint16_t)port_id)) {
++		rte_tel_data_add_dict_string(info, "status", "invalid port");
++		return 0;
++	}
++	dev = &rte_eth_devices[port_id];
++	priv = dev->data->dev_private;
++	if (priv == NULL || priv->txqs == NULL) {
++		rte_tel_data_add_dict_string(info, "status", "no txqs");
++		return 0;
++	}
++	for (i = 0; i < priv->txqs_n; i++) {
++		struct mlx5_txq_data *txq = (*priv->txqs)[i];
++
++		if (txq == NULL || txq->inlen_send_max == 0)
++			continue;
++		if (minimal) {
++			txq->inlen_send = MLX5_ESEG_MIN_INLINE_SIZE +
++					  MLX5_WQE_DSEG_SIZE;
++			txq->inlen_empw = txq->inlen_empw_max ?
++					  MLX5_WQE_SIZE +
++					  MLX5_DSEG_MIN_INLINE_SIZE : 0;
++		} else {
++			txq->inlen_send = txq->inlen_send_max;
++			txq->inlen_empw = txq->inlen_empw_max;
++		}
++		updated++;
++	}
++	if (updated == 0)
++		status = "no inline-capable queues";
++	rte_tel_data_add_dict_string(info, "status", status);
++	rte_tel_data_add_dict_string(info, "mode", minimal ? "min" : "full");
++	rte_tel_data_add_dict_u64(info, "port", (uint64_t)port_id);
++	rte_tel_data_add_dict_u64(info, "queues_updated", updated);
++	return 0;
++}
++
++RTE_INIT(mlx5_txq_inline_telemetry_init)
++{
++	rte_telemetry_register_cmd("/mlx5/tx_inline_set",
++				   mlx5_txq_inline_set_handler,
++				   "Set Tx data-inline budgets. Params: <port>,<full|min>");
++}
